@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Model weights & large caches
+model_cache/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+.cache/
+
+# Audio outputs & uploads
+outputs/
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
