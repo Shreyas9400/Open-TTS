@@ -1,8 +1,9 @@
 """
-Qwen3-TTS Voice Clone & Emotion Studio
+TTS Studio
 Local inference interface for:
   - SpragAI/qwen3-tts-emotion-tags (Inline emotion tag control + 9 preset voices)
   - Qwen/Qwen3-TTS-12Hz-1.7B-Base (Zero-shot custom voice cloning)
+  - fishaudio/openaudio-s1-mini (Zero-shot voice cloning + inline emotion markers, optional install)
   - Ollama API integration (gemma2:2b auto-rephraser & emotion tagger)
 """
 
@@ -10,6 +11,7 @@ import os
 import sys
 import time
 import json
+import hashlib
 import urllib.request
 import urllib.error
 import threading
@@ -35,9 +37,14 @@ import librosa
 
 MODEL_EMOTION_TAGS = "SpragAI/qwen3-tts-emotion-tags"
 MODEL_VOICE_CLONE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+MODEL_FISH_SPEECH = "fishaudio/openaudio-s1-mini"
+MODEL_FISH_SPEECH_FULL = "fishaudio/openaudio-s1"
 
 OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
+
+FISH_CHECKPOINTS_DIR = Path("fish_checkpoints")
+FISH_CHECKPOINTS_DIR.mkdir(exist_ok=True)
 
 SUPPORTED_LANGUAGES = [
     "Auto", "English", "Chinese", "Japanese", "Korean", "French",
@@ -68,6 +75,23 @@ EMOTION_TAGS = [
     ("😨 Fearful", "[Fearful]"),
     ("🤢 Disgusted", "[Disgusted]"),
     ("😲 Surprised", "[Surprised]"),
+]
+
+# Fish-Speech (OpenAudio S1) uses parenthesised inline markers instead of
+# bracketed tags, and — unlike the SpragAI model above — the same model also
+# does zero-shot voice cloning, so these markers work together with a
+# reference clip.
+FISH_EMOTION_MARKERS = [
+    ("😡 Angry", "(angry)"),
+    ("😢 Sad", "(sad)"),
+    ("😊 Happy", "(happy)"),
+    ("🤩 Excited", "(excited)"),
+    ("🍃 Gentle", "(gentle)"),
+    ("🤫 Whisper", "(whispering)"),
+    ("😂 Laughing", "(laughing)"),
+    ("😭 Crying", "(crying)"),
+    ("📢 Shouting", "(shouting)"),
+    ("😮‍💨 Sighing", "(sighing)"),
 ]
 
 
@@ -119,6 +143,12 @@ class ModelManager:
         self.load_error = None
         self.device_info = self._get_device_info()
         self.load_log = []
+        # Cache of pre-computed voice-clone prompts (reference audio + text
+        # already encoded into the model's conditioning features), keyed by
+        # a hash of the reference clip + transcript. Avoids re-encoding the
+        # same reference clip on every single generation call.
+        self._voice_clone_prompt_cache = {}
+        self.compile_enabled = False
 
     @classmethod
     def get_instance(cls):
@@ -148,7 +178,7 @@ class ModelManager:
             print(entry.encode("ascii", errors="replace").decode("ascii"))
         return entry
 
-    def load_model(self, model_id: str, dtype_choice: str, attn_impl: str):
+    def load_model(self, model_id: str, dtype_choice: str, attn_impl: str, compile_enabled: bool = False):
         if self.is_loading:
             return False, "Model is already loading..."
         if self.is_loaded and self.current_model_id == model_id:
@@ -157,6 +187,10 @@ class ModelManager:
         self.is_loading = True
         self.load_error = None
         self.load_log = []
+        self.compile_enabled = compile_enabled
+        # A new model invalidates any cached voice-clone prompts from the
+        # previous model instance.
+        self._voice_clone_prompt_cache = {}
 
         try:
             # If switching models, unload previous to free VRAM
@@ -172,7 +206,7 @@ class ModelManager:
                 gc.collect()
 
             self.log(f"Loading model: {model_id}")
-            self.log(f"dtype={dtype_choice}  attn={attn_impl}")
+            self.log(f"dtype={dtype_choice}  attn={attn_impl}  compile={compile_enabled}")
 
             dtype_map = {
                 "bfloat16 (Recommended)": torch.bfloat16,
@@ -186,38 +220,50 @@ class ModelManager:
             else:
                 device_map = "cpu"
                 dtype = torch.float32
-                self.log("⚠️ No CUDA detected – using CPU.")
+                attn_impl = "sdpa"
+                self.log("⚠️ No CUDA detected – using CPU (attn forced to sdpa).")
 
             self.log("Importing qwen_tts …")
             from qwen_tts import Qwen3TTSModel
 
-            kwargs = dict(device_map=device_map, dtype=dtype)
-            self.log(f"from_pretrained kwargs: {list(kwargs.keys())}")
-            self.log("Loading weights into GPU memory…")
-
             model_path = resolve_model_path(model_id)
             self.log(f"Model path: {model_path}")
 
-            import queue as _queue
-            result_q = _queue.Queue()
+            def _try_load(chosen_attn):
+                kwargs = dict(device_map=device_map, dtype=dtype)
+                if chosen_attn and chosen_attn != "default":
+                    kwargs["attn_implementation"] = chosen_attn
+                self.log(f"from_pretrained kwargs: {kwargs}")
 
-            def _load():
-                try:
-                    m = Qwen3TTSModel.from_pretrained(model_path, **kwargs)
-                    result_q.put(("ok", m))
-                except BaseException as _e:
-                    result_q.put(("err", _e, traceback.format_exc()))
+                import queue as _queue
+                result_q = _queue.Queue()
 
-            t = threading.Thread(target=_load, daemon=True)
-            t.start()
+                def _load():
+                    try:
+                        m = Qwen3TTSModel.from_pretrained(model_path, **kwargs)
+                        result_q.put(("ok", m))
+                    except BaseException as _e:
+                        result_q.put(("err", _e, traceback.format_exc()))
 
-            dots = 0
-            while t.is_alive():
-                t.join(timeout=5)
-                dots += 1
-                self.log(f"  … still loading {'.' * dots}")
+                t = threading.Thread(target=_load, daemon=True)
+                t.start()
+                dots = 0
+                while t.is_alive():
+                    t.join(timeout=5)
+                    dots += 1
+                    self.log(f"  … still loading {'.' * dots}")
+                return result_q.get_nowait()
 
-            result = result_q.get_nowait()
+            self.log("Loading weights into GPU memory…")
+            result = _try_load(attn_impl)
+
+            # flash_attention_2 needs the `flash-attn` wheel installed and a
+            # compatible GPU; fall back to sdpa automatically instead of
+            # hard-failing the whole load.
+            if result[0] == "err" and attn_impl == "flash_attention_2":
+                self.log(f"⚠️ flash_attention_2 failed ({result[1]}); retrying with sdpa…")
+                result = _try_load("sdpa")
+
             if result[0] == "err":
                 raise result[1]
 
@@ -225,6 +271,10 @@ class ModelManager:
             self.current_model_id = model_id
             self.is_loaded = True
             self.is_loading = False
+
+            if compile_enabled:
+                self._try_compile_model()
+
             self.log(f"✅ Model '{model_id}' loaded successfully!")
             return True, "\n".join(self.load_log)
 
@@ -234,6 +284,27 @@ class ModelManager:
             self.log(f"❌ Load failed: {type(e).__name__}: {e}")
             self.log(traceback.format_exc())
             return False, "\n".join(self.load_log)
+
+    def _try_compile_model(self):
+        """
+        Best-effort torch.compile of the underlying causal LM. qwen_tts wraps
+        the actual decoder under one of a few common attribute names
+        depending on version, so we probe for it rather than assuming one.
+        Never fatal: a failure here just means we run uncompiled.
+        """
+        candidate_attrs = ["model", "language_model", "llm", "transformer", "decoder"]
+        for attr in candidate_attrs:
+            submodule = getattr(self.model, attr, None)
+            if isinstance(submodule, torch.nn.Module):
+                try:
+                    compiled = torch.compile(submodule, mode="reduce-overhead")
+                    setattr(self.model, attr, compiled)
+                    self.log(f"⚡ torch.compile applied to '{attr}' (first generation will warm up / be slower).")
+                    return
+                except Exception as e:
+                    self.log(f"⚠️ torch.compile on '{attr}' failed: {e}")
+                    return
+        self.log("⚠️ torch.compile skipped: no compatible submodule found on this qwen_tts version.")
 
     def generate_custom_voice(
         self,
@@ -264,6 +335,40 @@ class ModelManager:
 
         return wavs, sr
 
+    def _get_or_create_voice_clone_prompt(self, ref_audio_path: str, ref_text: str):
+        """
+        Returns (prompt_object_or_None, was_cache_hit). Newer qwen_tts builds
+        expose create_voice_clone_prompt(), which encodes the reference clip
+        into reusable conditioning features once instead of on every single
+        generate call — this is the single biggest speed win for repeated
+        generations against the same reference voice. Older builds without
+        that method return (None, False) so the caller falls back to passing
+        raw ref_audio/ref_text on every call.
+        """
+        if not hasattr(self.model, "create_voice_clone_prompt"):
+            return None, False
+
+        with open(ref_audio_path, "rb") as f:
+            audio_bytes = f.read()
+        digest = hashlib.sha256(audio_bytes + ref_text.encode("utf-8")).hexdigest()
+        cache_key = (self.current_model_id, digest)
+
+        cached = self._voice_clone_prompt_cache.get(cache_key)
+        if cached is not None:
+            return cached, True
+
+        processed_path = preprocess_audio(ref_audio_path)
+        try:
+            prompt = self.model.create_voice_clone_prompt(ref_audio=processed_path, ref_text=ref_text)
+        finally:
+            try:
+                Path(processed_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        self._voice_clone_prompt_cache[cache_key] = prompt
+        return prompt, False
+
     def generate_voice_clone(
         self,
         text: str,
@@ -277,29 +382,176 @@ class ModelManager:
         if not self.is_loaded or self.model is None:
             raise RuntimeError("Model is not loaded. Please load the model first.")
 
-        processed_path = preprocess_audio(ref_audio_path)
-        kwargs = dict(
-            text=text,
-            language=None if language == "Auto" else language,
-            ref_audio=processed_path,
-            ref_text=ref_text,
-        )
+        lang = None if language == "Auto" else language
         gen_kwargs = dict(
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
         )
+
+        prompt, cache_hit = self._get_or_create_voice_clone_prompt(ref_audio_path, ref_text)
+
+        if prompt is not None:
+            try:
+                wavs, sr = self.model.generate_voice_clone(
+                    text=text, language=lang, voice_clone_prompt=prompt, **gen_kwargs
+                )
+                return wavs, sr, cache_hit
+            except TypeError:
+                # This qwen_tts build doesn't accept voice_clone_prompt after all;
+                # fall through to the uncached per-call path below.
+                pass
+
+        processed_path = preprocess_audio(ref_audio_path)
         try:
-            wavs, sr = self.model.generate_voice_clone(**kwargs, **gen_kwargs)
-        except TypeError:
-            wavs, sr = self.model.generate_voice_clone(**kwargs)
+            kwargs = dict(text=text, language=lang, ref_audio=processed_path, ref_text=ref_text)
+            try:
+                wavs, sr = self.model.generate_voice_clone(**kwargs, **gen_kwargs)
+            except TypeError:
+                wavs, sr = self.model.generate_voice_clone(**kwargs)
+        finally:
+            try:
+                Path(processed_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        return wavs, sr, False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fish-Speech (OpenAudio S1) Manager — separate backend/engine from qwen_tts.
+# One model does both zero-shot voice cloning AND inline emotion markers, so
+# it runs alongside (not instead of) the Qwen models above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FishSpeechManager:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __init__(self):
+        self.engine = None
+        self.current_model_id = None
+        self.is_loaded = False
+        self.is_loading = False
+        self.load_log = []
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def log(self, message: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{ts}] {message}"
+        self.load_log.append(entry)
+        try:
+            print(entry)
+        except UnicodeEncodeError:
+            print(entry.encode("ascii", errors="replace").decode("ascii"))
+        return entry
+
+    def load_model(self, model_id: str, compile_enabled: bool = False):
+        if self.is_loading:
+            return False, "Fish-Speech model is already loading..."
+        if self.is_loaded and self.current_model_id == model_id:
+            return True, f"Fish-Speech model {model_id} already loaded."
+
+        self.is_loading = True
+        self.load_log = []
 
         try:
-            Path(processed_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+            self.log("Importing fish_speech … (pip install fish-speech)")
+            from fish_speech.inference_engine import TTSInferenceEngine
+            from fish_speech.models.dac.inference import load_model as load_decoder_model
+            from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
+            from huggingface_hub import snapshot_download
 
-        return wavs, sr
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            precision = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            if not torch.cuda.is_available():
+                self.log("⚠️ No CUDA detected – Fish-Speech will run on CPU (slow).")
+
+            local_dir = FISH_CHECKPOINTS_DIR / model_id.split("/")[-1]
+            if not (local_dir / "codec.pth").exists():
+                self.log(f"Downloading checkpoint for {model_id} → {local_dir} (first run only)…")
+                snapshot_download(repo_id=model_id, local_dir=str(local_dir))
+            else:
+                self.log(f"Using cached checkpoint: {local_dir}")
+
+            self.log("Launching text2semantic worker thread…")
+            llama_queue = launch_thread_safe_queue(
+                checkpoint_path=str(local_dir),
+                device=device,
+                precision=precision,
+                compile=compile_enabled,
+            )
+
+            self.log("Loading DAC decoder…")
+            decoder_model = load_decoder_model(
+                config_name="modded_dac_vq",
+                checkpoint_path=str(local_dir / "codec.pth"),
+                device=device,
+            )
+
+            self.engine = TTSInferenceEngine(
+                llama_queue=llama_queue,
+                decoder_model=decoder_model,
+                precision=precision,
+                compile=compile_enabled,
+            )
+            self.current_model_id = model_id
+            self.is_loaded = True
+            self.is_loading = False
+            self.log(f"✅ Fish-Speech model '{model_id}' loaded successfully!")
+            return True, "\n".join(self.load_log)
+
+        except BaseException as e:
+            self.is_loading = False
+            self.log(f"❌ Load failed: {type(e).__name__}: {e}")
+            self.log(traceback.format_exc())
+            return False, "\n".join(self.load_log)
+
+    def generate(
+        self,
+        text: str,
+        ref_audio_path: str,
+        ref_text: str,
+        temperature: float = 0.8,
+        top_p: float = 0.8,
+        repetition_penalty: float = 1.1,
+    ):
+        if not self.is_loaded or self.engine is None:
+            raise RuntimeError("Fish-Speech model is not loaded. Please load it first.")
+
+        from fish_speech.utils.schema import ServeTTSRequest, ServeReferenceAudio
+
+        with open(ref_audio_path, "rb") as f:
+            ref_bytes = f.read()
+
+        req = ServeTTSRequest(
+            text=text,
+            references=[ServeReferenceAudio(audio=ref_bytes, text=ref_text)],
+            use_memory_cache="on",  # lets the engine itself dedupe repeat references
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            format="wav",
+        )
+
+        sr, audio = None, None
+        for result in self.engine.inference(req):
+            if result.code == "error":
+                raise result.error
+            if result.code == "final":
+                sr, audio = result.audio
+
+        if audio is None:
+            raise RuntimeError("Fish-Speech returned no audio.")
+
+        return audio, sr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -423,7 +675,7 @@ def append_emotion_tag(current_text: str, tag: str) -> str:
 # Gradio event handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_model_handler(model_id, dtype_choice, attn_impl):
+def load_model_handler(model_id, dtype_choice, attn_impl, compile_enabled):
     mgr = ModelManager.get_instance()
     if mgr.is_loaded and mgr.current_model_id == model_id:
         yield (
@@ -441,7 +693,7 @@ def load_model_handler(model_id, dtype_choice, attn_impl):
         gr.update(value=f"🟡 Loading **{model_id}**…"),
     )
 
-    success, log_text = mgr.load_model(model_id, dtype_choice, attn_impl)
+    success, log_text = mgr.load_model(model_id, dtype_choice, attn_impl, compile_enabled)
 
     if success:
         yield (
@@ -545,7 +797,7 @@ def generate_voice_clone_handler(
     progress(0, desc="Cloning voice & generating speech…")
     start_time = time.time()
 
-    wavs, sr = mgr.generate_voice_clone(
+    wavs, sr, cache_hit = mgr.generate_voice_clone(
         text=text.strip(),
         language=language,
         ref_audio_path=ref_audio,
@@ -560,6 +812,92 @@ def generate_voice_clone_handler(
 
     out_path = save_output(wavs, sr)
     audio_duration = round(len(wavs[0]) / sr, 2)
+    rtf = round(elapsed / audio_duration, 3) if audio_duration > 0 else 0
+    cache_note = "reused (fast)" if cache_hit else "computed"
+
+    stats = (
+        f"✅ Generated in **{elapsed}s** | "
+        f"Duration: **{audio_duration}s** | "
+        f"RTF: **{rtf}** | "
+        f"Voice prompt: **{cache_note}** | "
+        f"Saved → `{out_path}`"
+    )
+
+    return out_path, stats
+
+
+def load_fish_speech_handler(model_id, compile_enabled):
+    mgr = FishSpeechManager.get_instance()
+    if mgr.is_loaded and mgr.current_model_id == model_id:
+        yield (
+            gr.update(value=f"✅ {model_id} already loaded!", variant="secondary"),
+            gr.update(value=f"✅ Model {model_id} is ready for inference."),
+            gr.update(interactive=True),
+        )
+        return
+
+    yield (
+        gr.update(value=f"⏳ Loading {model_id}…", variant="secondary", interactive=False),
+        gr.update(value=f"Starting load for {model_id}… (first run also downloads the checkpoint)"),
+        gr.update(interactive=False),
+    )
+
+    success, log_text = mgr.load_model(model_id, compile_enabled)
+
+    if success:
+        yield (
+            gr.update(value="✅ Model Loaded!", variant="primary", interactive=True),
+            gr.update(value=log_text),
+            gr.update(interactive=True),
+        )
+    else:
+        yield (
+            gr.update(value="❌ Load Failed – retry", variant="stop", interactive=True),
+            gr.update(value=log_text),
+            gr.update(interactive=False),
+        )
+
+
+def generate_fish_speech_handler(
+    text,
+    ref_audio,
+    ref_text,
+    temperature,
+    top_p,
+    rep_penalty,
+    progress=gr.Progress(track_tqdm=True),
+):
+    mgr = FishSpeechManager.get_instance()
+
+    if not mgr.is_loaded:
+        raise gr.Error("No Fish-Speech model loaded! Load it in this tab's Setup section first.")
+
+    if not text or not text.strip():
+        raise gr.Error("Please enter some text to synthesize.")
+
+    if ref_audio is None:
+        raise gr.Error("Please upload a reference audio file for voice cloning.")
+
+    if not ref_text or not ref_text.strip():
+        raise gr.Error("Please provide the reference text (transcript of the reference audio).")
+
+    progress(0, desc="Cloning voice & generating expressive speech…")
+    start_time = time.time()
+
+    audio, sr = mgr.generate(
+        text=text.strip(),
+        ref_audio_path=ref_audio,
+        ref_text=ref_text.strip(),
+        temperature=temperature,
+        top_p=top_p,
+        repetition_penalty=rep_penalty,
+    )
+
+    elapsed = round(time.time() - start_time, 2)
+    progress(1.0, desc="Done!")
+
+    out_path = save_output([audio], sr)
+    audio_duration = round(len(audio) / sr, 2)
     rtf = round(elapsed / audio_duration, 3) if audio_duration > 0 else 0
 
     stats = (
@@ -577,32 +915,23 @@ def generate_voice_clone_handler(
 # ─────────────────────────────────────────────────────────────────────────────
 
 CUSTOM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --bg-primary:      #0d0f14;
-  --bg-secondary:    #12151c;
-  --bg-card:         #181c27;
-  --bg-card-hover:   #1f2333;
-  --border-color:    #2a2f42;
-  --border-accent:   #4f6eff;
-  --text-primary:    #e8eaf6;
-  --text-secondary:  #9ba3c4;
-  --text-muted:      #5c6480;
-  --accent-blue:     #4f6eff;
-  --accent-purple:   #a855f7;
-  --accent-cyan:     #06b6d4;
-  --accent-green:    #10b981;
-  --accent-yellow:   #f59e0b;
-  --accent-red:      #ef4444;
-  --gradient-hero:   linear-gradient(135deg, #1a1f35 0%, #0d1525 50%, #1a1035 100%);
-  --gradient-accent: linear-gradient(135deg, #4f6eff 0%, #a855f7 100%);
-  --gradient-ollama: linear-gradient(135deg, #059669 0%, #0284c7 100%);
-  --shadow-glow:     0 0 40px rgba(79, 110, 255, 0.15);
+  --bg-primary:      #0f1116;
+  --bg-secondary:    #161922;
+  --bg-card:         #1b1f2a;
+  --border-color:    #2a2f3d;
+  --text-primary:    #e6e8f0;
+  --text-secondary:  #9aa1b8;
+  --text-muted:      #6a7290;
+  --accent:          #5b7cfa;
+  --accent-strong:   #4a68e0;
+  --success:         #34c98f;
+  --warn:            #e0a83d;
   --radius-sm:       8px;
   --radius-md:       12px;
   --radius-lg:       16px;
-  --radius-xl:       24px;
   --font-sans:       'Inter', sans-serif;
   --font-mono:       'JetBrains Mono', monospace;
 }
@@ -613,69 +942,35 @@ body, .gradio-container {
   color: var(--text-primary) !important;
 }
 
+/* Calm, flat hero — no gradients, no animation, just a clear title + one-line summary */
 .hero-header {
-  background: var(--gradient-hero);
+  background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-xl);
-  padding: 28px 36px;
-  margin-bottom: 20px;
-  position: relative;
-  overflow: hidden;
-  box-shadow: var(--shadow-glow);
-}
-.hero-header::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(ellipse at 20% 50%, rgba(79,110,255,0.12) 0%, transparent 60%),
-              radial-gradient(ellipse at 80% 20%, rgba(168,85,247,0.10) 0%, transparent 60%);
-  pointer-events: none;
+  border-radius: var(--radius-lg);
+  padding: 20px 28px;
+  margin-bottom: 16px;
 }
 .hero-header h1 {
-  font-size: 1.9rem;
+  font-size: 1.4rem;
   font-weight: 700;
-  background: var(--gradient-accent);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  margin: 0 0 8px 0;
-  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+  letter-spacing: -0.01em;
 }
 .hero-header p {
   color: var(--text-secondary);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   margin: 0;
   line-height: 1.5;
 }
 
-.badge-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 14px;
-}
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border-radius: 100px;
-  font-size: 0.78rem;
-  font-weight: 500;
-  border: 1px solid;
-}
-.badge-blue   { background: rgba(79,110,255,0.12);  border-color: rgba(79,110,255,0.4);  color: #7b9fff; }
-.badge-purple { background: rgba(168,85,247,0.12);  border-color: rgba(168,85,247,0.4);  color: #c084fc; }
-.badge-cyan   { background: rgba(6,182,212,0.12);   border-color: rgba(6,182,212,0.4);   color: #22d3ee; }
-.badge-green  { background: rgba(16,185,129,0.12);  border-color: rgba(16,185,129,0.4);  color: #34d399; }
-
 .section-title {
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-muted);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -687,53 +982,51 @@ body, .gradio-container {
   background: var(--border-color);
 }
 
-/* Emotion tag quick buttons bar */
+/* Emotion / marker quick-insert buttons */
 .tag-bar-wrap {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 10px 0 16px 0;
-  padding: 12px;
+  margin: 8px 0 14px 0;
+  padding: 10px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
 }
 
 .emotion-btn button {
-  background: rgba(255, 255, 255, 0.05) !important;
+  background: transparent !important;
   border: 1px solid var(--border-color) !important;
-  color: var(--text-primary) !important;
-  font-size: 0.80rem !important;
-  font-weight: 600 !important;
-  padding: 6px 12px !important;
+  color: var(--text-secondary) !important;
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  padding: 5px 12px !important;
   border-radius: 20px !important;
-  transition: all 0.2s ease !important;
+  box-shadow: none !important;
 }
 .emotion-btn button:hover {
-  background: rgba(79, 110, 255, 0.2) !important;
-  border-color: var(--accent-blue) !important;
-  transform: translateY(-2px);
+  border-color: var(--accent) !important;
+  color: var(--text-primary) !important;
 }
 
-/* Ollama assistant box */
+/* Ollama assistant box — same neutral card style as everything else */
 .ollama-card {
-  background: rgba(6, 182, 212, 0.06);
-  border: 1px solid rgba(6, 182, 212, 0.25);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 14px 18px;
-  margin-bottom: 16px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
 }
 .ollama-rephrase-btn button {
-  background: var(--gradient-ollama) !important;
+  background: var(--accent) !important;
   color: white !important;
   font-weight: 600 !important;
   border-radius: var(--radius-sm) !important;
   border: none !important;
-  box-shadow: 0 4px 14px rgba(5, 150, 105, 0.3) !important;
+  box-shadow: none !important;
 }
 .ollama-rephrase-btn button:hover {
-  opacity: 0.9 !important;
-  transform: translateY(-1px);
+  background: var(--accent-strong) !important;
 }
 
 /* Gradio component overrides */
@@ -746,24 +1039,24 @@ body, .gradio-container {
 }
 .gradio-container .tabs button.selected {
   background: var(--bg-card) !important;
-  color: var(--accent-blue) !important;
-  border-bottom: 2px solid var(--accent-blue) !important;
+  color: var(--accent) !important;
+  border-bottom: 2px solid var(--accent) !important;
   font-weight: 600;
 }
 .gradio-container .tabs button {
   color: var(--text-secondary) !important;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0 !important;
   font-family: var(--font-sans) !important;
-  font-size: 0.88rem;
-  padding: 10px 18px;
+  font-size: 0.86rem;
+  padding: 9px 16px;
 }
 
 label, .label-wrap {
   color: var(--text-secondary) !important;
-  font-size: 0.82rem !important;
+  font-size: 0.8rem !important;
   font-weight: 500 !important;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
 }
 
 input[type=text], textarea, .gr-textbox textarea {
@@ -775,76 +1068,49 @@ input[type=text], textarea, .gr-textbox textarea {
   font-size: 0.92rem;
 }
 input[type=text]:focus, textarea:focus {
-  border-color: var(--accent-blue) !important;
-  box-shadow: 0 0 0 3px rgba(79,110,255,0.15) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(91,124,250,0.2) !important;
   outline: none !important;
 }
 
+/* One consistent button style everywhere — no per-section gradients */
 .gr-button, button.primary, .primary {
-  background: var(--gradient-accent) !important;
+  background: var(--accent) !important;
   border: none !important;
   border-radius: var(--radius-sm) !important;
   color: white !important;
   font-weight: 600 !important;
   font-family: var(--font-sans) !important;
-  box-shadow: 0 4px 15px rgba(79,110,255,0.3);
+  box-shadow: none !important;
 }
 .gr-button:hover, button.primary:hover {
-  opacity: 0.88 !important;
-  transform: translateY(-1px);
+  background: var(--accent-strong) !important;
 }
 
 .active-model-badge {
-  background: rgba(16, 185, 129, 0.12);
-  border: 1px solid rgba(16, 185, 129, 0.35);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--success);
   border-radius: var(--radius-sm);
   padding: 8px 16px;
-  font-size: 0.88rem;
-  color: #34d399;
+  font-size: 0.85rem;
+  color: var(--text-primary);
   font-family: var(--font-mono);
   display: inline-block;
   margin-bottom: 12px;
 }
 
-.tip-box {
-  background: rgba(79,110,255,0.08);
-  border: 1px solid rgba(79,110,255,0.3);
+.tip-box, .warn-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  padding: 12px 16px;
-  font-size: 0.86rem;
-  color: #93b4ff;
-  line-height: 1.6;
+  padding: 10px 14px;
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
 }
-
-.warn-box {
-  background: rgba(245,158,11,0.08);
-  border: 1px solid rgba(245,158,11,0.3);
-  border-radius: var(--radius-sm);
-  padding: 12px 16px;
-  font-size: 0.86rem;
-  color: #fcd34d;
-  line-height: 1.6;
-}
-
-@keyframes pulse-glow {
-  0%, 100% { opacity: 0.4; transform: scaleY(1); }
-  50%       { opacity: 0.9; transform: scaleY(1.4); }
-}
-.waveform-bar {
-  display: inline-block;
-  width: 3px;
-  height: 18px;
-  background: var(--gradient-accent);
-  border-radius: 2px;
-  margin: 0 2px;
-  animation: pulse-glow 1.2s ease-in-out infinite;
-}
-.waveform-bar:nth-child(2)  { animation-delay: 0.15s; height: 26px; }
-.waveform-bar:nth-child(3)  { animation-delay: 0.30s; height: 34px; }
-.waveform-bar:nth-child(4)  { animation-delay: 0.45s; height: 22px; }
-.waveform-bar:nth-child(5)  { animation-delay: 0.60s; height: 30px; }
-.waveform-bar:nth-child(6)  { animation-delay: 0.75s; height: 18px; }
-.waveform-bar:nth-child(7)  { animation-delay: 0.90s; height: 28px; }
+.warn-box { border-left: 3px solid var(--warn); }
+.tip-box { border-left: 3px solid var(--accent); }
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -855,33 +1121,16 @@ def build_ui():
     mgr = ModelManager.get_instance()
     dev_info_str = format_device_info(mgr.device_info)
 
-    with gr.Blocks(title="Qwen3-TTS Voice & Emotion Studio") as demo:
+    with gr.Blocks(title="TTS Studio") as demo:
 
         # ── Hero ────────────────────────────────────────────────────────────
-        gr.HTML(f"""
+        gr.HTML("""
         <div class="hero-header">
-          <div style="display:flex; align-items:center; gap:16px; margin-bottom:8px;">
-            <div>
-              <span class="waveform-bar"></span>
-              <span class="waveform-bar"></span>
-              <span class="waveform-bar"></span>
-              <span class="waveform-bar"></span>
-              <span class="waveform-bar"></span>
-              <span class="waveform-bar"></span>
-              <span class="waveform-bar"></span>
-            </div>
-            <h1 style="margin:0;">Qwen3-TTS Voice & Emotion Studio</h1>
-          </div>
+          <h1>TTS Studio</h1>
           <p>
-            Local expressive speech synthesis with <strong>Emotion Tag Switching</strong> (SpragAI),
-            <strong>Zero-shot Voice Cloning</strong> (Qwen3-TTS-Base), and <strong>Ollama AI Auto-Rephrasing</strong>.
+            Emotion tags (SpragAI) · Zero-shot voice cloning (Qwen3-TTS) ·
+            Clone + emotion in one model (Fish-Speech) · Ollama auto-rephrasing
           </p>
-          <div class="badge-row">
-            <span class="badge badge-purple">🎭 Emotion Tags (SpragAI)</span>
-            <span class="badge badge-blue">🎙️ Zero-Shot Voice Clone</span>
-            <span class="badge badge-green">🤖 Ollama (gemma2:2b)</span>
-            <span class="badge badge-cyan">⚡ Local GPU Inference</span>
-          </div>
         </div>
         """)
 
@@ -1138,7 +1387,113 @@ def build_ui():
                 )
 
             # ═════════════════════════════════════════════════════════════════
-            # TAB 3: Setup & Model Manager
+            # TAB 3: Fish-Speech (OpenAudio S1) — voice cloning + emotion markers
+            # in a single model
+            # ═════════════════════════════════════════════════════════════════
+            with gr.TabItem("🐟 Clone + Emotion (Fish-Speech)"):
+                gr.Markdown(
+                    "One model does both: zero-shot voice cloning **and** inline emotion/tone markers. "
+                    "Model weights are released under CC-BY-NC-SA-4.0 (non-commercial). "
+                    "Needs `pip install fish-speech` — see the Guide tab."
+                )
+                with gr.Row(equal_height=False):
+
+                    with gr.Column(scale=5):
+                        gr.HTML('<div class="section-title">📝 Target Text & Emotion Markers</div>')
+                        fish_target_text = gr.Textbox(
+                            label="Text to synthesize (use markers like (happy), (whispering), etc.)",
+                            placeholder="(happy) Welcome everyone! (gentle) We're really glad you could join us today.",
+                            lines=6,
+                            max_lines=20,
+                            elem_id="fish-target-text",
+                        )
+
+                        gr.HTML('<div class="section-title" style="margin-top:12px;">🏷️ Quick Insert Markers</div>')
+                        with gr.Row(elem_classes=["tag-bar-wrap"]):
+                            fish_tag_btns = []
+                            for label, marker_val in FISH_EMOTION_MARKERS:
+                                b = gr.Button(label, size="sm", elem_classes=["emotion-btn"])
+                                fish_tag_btns.append((b, marker_val))
+
+                        for btn, marker_val in fish_tag_btns:
+                            btn.click(
+                                fn=lambda txt, t=marker_val: append_emotion_tag(txt, t),
+                                inputs=[fish_target_text],
+                                outputs=[fish_target_text],
+                            )
+
+                        gr.HTML('<div class="section-title" style="margin-top:20px;">🎤 Reference Voice Sample</div>')
+                        fish_ref_audio = gr.Audio(
+                            label="Reference Audio (10-30 sec recommended)",
+                            type="filepath",
+                            elem_id="fish-ref-audio",
+                        )
+                        fish_ref_text = gr.Textbox(
+                            label="Reference Transcript (exact words spoken in audio)",
+                            lines=3,
+                            elem_id="fish-ref-text",
+                        )
+
+                    with gr.Column(scale=4):
+                        gr.HTML('<div class="section-title">⚙️ Generation Parameters</div>')
+                        with gr.Accordion("Advanced parameters", open=False):
+                            fish_temp = gr.Slider(label="Temperature", minimum=0.1, maximum=1.0, value=0.8, step=0.05)
+                            fish_top_p = gr.Slider(label="Top-p", minimum=0.1, maximum=1.0, value=0.8, step=0.05)
+                            fish_rep_penalty = gr.Slider(label="Repetition penalty", minimum=0.9, maximum=2.0, value=1.1, step=0.05)
+
+                        gr.HTML('<div class="section-title" style="margin-top:20px;">📦 Load Model</div>')
+                        fish_model_choice = gr.Dropdown(
+                            label="Fish-Speech variant",
+                            choices=[
+                                (f"OpenAudio S1-mini ({MODEL_FISH_SPEECH}) — faster", MODEL_FISH_SPEECH),
+                                (f"OpenAudio S1 ({MODEL_FISH_SPEECH_FULL}) — higher quality", MODEL_FISH_SPEECH_FULL),
+                            ],
+                            value=MODEL_FISH_SPEECH,
+                        )
+                        fish_compile_checkbox = gr.Checkbox(label="⚡ Enable compile (experimental)", value=False)
+                        fish_load_btn = gr.Button("🚀 Load Fish-Speech Model", variant="primary")
+                        fish_load_log = gr.Textbox(
+                            label="Load Log",
+                            value="Fish-Speech model not loaded yet.",
+                            lines=6,
+                            interactive=False,
+                        )
+
+                        generate_fish_btn = gr.Button(
+                            "🐟 Clone Voice & Generate",
+                            variant="primary",
+                            size="lg",
+                        )
+
+                        gr.HTML('<div class="section-title" style="margin-top:20px;">🔊 Output Audio</div>')
+                        fish_output_audio = gr.Audio(
+                            label="Generated Speech",
+                            type="filepath",
+                            interactive=False,
+                        )
+                        fish_gen_stats = gr.Markdown(value="")
+
+                fish_load_btn.click(
+                    fn=load_fish_speech_handler,
+                    inputs=[fish_model_choice, fish_compile_checkbox],
+                    outputs=[fish_load_btn, fish_load_log, fish_load_btn],
+                )
+
+                generate_fish_btn.click(
+                    fn=generate_fish_speech_handler,
+                    inputs=[
+                        fish_target_text,
+                        fish_ref_audio,
+                        fish_ref_text,
+                        fish_temp,
+                        fish_top_p,
+                        fish_rep_penalty,
+                    ],
+                    outputs=[fish_output_audio, fish_gen_stats],
+                )
+
+            # ═════════════════════════════════════════════════════════════════
+            # TAB 4: Setup & Model Manager
             # ═════════════════════════════════════════════════════════════════
             with gr.TabItem("⚙️ Setup & Model"):
                 with gr.Row():
@@ -1168,8 +1523,14 @@ def build_ui():
                         )
                         attn_impl = gr.Dropdown(
                             label="Attention implementation",
-                            choices=["sdpa", "flash_attention_2", "default"],
-                            value="sdpa",
+                            choices=["flash_attention_2", "sdpa", "default"],
+                            value="flash_attention_2",
+                            info="Falls back to sdpa automatically if flash-attn isn't installed / GPU isn't compatible.",
+                        )
+                        compile_checkbox = gr.Checkbox(
+                            label="⚡ Enable torch.compile (experimental)",
+                            value=False,
+                            info="Speeds up steady-state generation after a slower first call. Safe to leave off if you hit compile errors.",
                         )
 
                         load_btn = gr.Button(
@@ -1205,12 +1566,12 @@ def build_ui():
 
                 load_btn.click(
                     fn=load_model_handler,
-                    inputs=[model_choice, dtype_choice, attn_impl],
+                    inputs=[model_choice, dtype_choice, attn_impl, compile_checkbox],
                     outputs=[load_btn, load_log, load_btn, status_banner],
                 )
 
             # ═════════════════════════════════════════════════════════════════
-            # TAB 4: Output History
+            # TAB 5: Output History
             # ═════════════════════════════════════════════════════════════════
             with gr.TabItem("📂 Output History"):
                 gr.HTML('<div class="section-title">Recent Generations</div>')
@@ -1232,7 +1593,7 @@ def build_ui():
                 refresh_btn.click(fn=refresh_history, inputs=[], outputs=history_list)
 
             # ═════════════════════════════════════════════════════════════════
-            # TAB 5: Documentation & Guide
+            # TAB 6: Documentation & Guide
             # ═════════════════════════════════════════════════════════════════
             with gr.TabItem("📖 Guide"):
                 gr.Markdown("""
@@ -1270,6 +1631,39 @@ This fine-tuned model introduces inline emotion tags across 9 preset voices.
 - Clone any voice using a 5–15 second clean reference audio clip.
 - Accompany the audio with an exact word-for-word transcript.
 - The base model clones the voice's pitch, timbre, and natural delivery from the reference.
+- Repeat generations against the **same** reference clip reuse a cached voice prompt instead of
+  re-encoding the reference audio every time — look for "Voice prompt: reused (fast)" in the stats line.
+
+---
+
+### 🐟 4. Fish-Speech / OpenAudio S1 — Clone + Emotion in one model
+Unlike the two models above, Fish-Speech does **both** zero-shot voice cloning and inline
+emotion/tone markers in a single pass — no need to pick between cloning and expressiveness.
+
+Install it separately (own dependency stack, heavier than the base install):
+```bash
+pip install fish-speech
+```
+The first "Load Fish-Speech Model" click downloads the checkpoint automatically (a few GB) into
+`fish_checkpoints/`. Model weights are released under **CC-BY-NC-SA-4.0** (non-commercial use only).
+
+#### Marker examples:
+`(happy)` `(sad)` `(angry)` `(excited)` `(gentle)` `(whispering)` `(laughing)` `(crying)` `(shouting)` `(sighing)`
+
+```text
+(happy) Welcome everyone! (whispering) Come a little closer... (laughing) just kidding!
+```
+
+---
+
+### ⚡ 5. Speed tips
+- **Attention backend**: `flash_attention_2` is fastest on Ampere+ GPUs; the app now falls back to
+  `sdpa` automatically if flash-attn isn't installed, so it's safe to leave on.
+- **torch.compile**: toggle it on in the Setup tab for steady-state speedups; the first generation
+  after loading will be noticeably slower while it compiles.
+- **Voice-clone prompt caching**: reusing the same reference clip across multiple generations skips
+  re-encoding it every time (Base model + Fish-Speech's own reference cache).
+- **dtype**: `bfloat16` is the fastest safe option on modern GPUs; `float16` is a fallback for older cards.
                 """)
 
     return demo
@@ -1281,10 +1675,11 @@ This fine-tuned model introduces inline emotion tags across 9 preset voices.
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Qwen3-TTS Voice & Emotion Studio")
+    print("  TTS Studio")
     print("  Supported Models:")
     print(f"    - {MODEL_EMOTION_TAGS} (Emotion Tags)")
     print(f"    - {MODEL_VOICE_CLONE} (Voice Clone)")
+    print(f"    - {MODEL_FISH_SPEECH} (Voice Clone + Emotion, optional install)")
     print("=" * 60)
 
     demo = build_ui()

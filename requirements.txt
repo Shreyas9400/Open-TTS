@@ -6,3 +6,11 @@ numpy>=1.24.0
 transformers>=4.40.0
 accelerate>=0.28.0
 huggingface-hub>=0.23.0
+librosa>=0.10.0
+
+# Optional, for faster attention on Ampere+ GPUs (Setup tab defaults to it
+# and falls back to sdpa automatically if this isn't installed):
+#   pip install flash-attn --no-build-isolation
+#
+# Optional, for the "Clone + Emotion (Fish-Speech)" tab:
+#   pip install -r requirements-fish.txt

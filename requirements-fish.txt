@@ -1,0 +1,12 @@
+# Optional extra for the "🐟 Clone + Emotion (Fish-Speech)" tab.
+# Kept separate from requirements.txt because fish-speech pulls its own
+# fairly heavy dependency set that can otherwise fight with the
+# qwen-tts / torch pins in the base install.
+#
+# Install only if you want the Fish-Speech (OpenAudio S1) tab:
+#   pip install -r requirements-fish.txt
+#
+# Model weights (downloaded automatically on first "Load Fish-Speech Model"
+# click) are released under CC-BY-NC-SA-4.0 — non-commercial use only.
+
+fish-speech>=0.1.0
