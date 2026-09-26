@@ -99,11 +99,11 @@
 
             <div class="section-title" style="margin-top:20px;">Reference Voice Sample</div>
             <div class="dropzone" id="clone-dropzone">
-              <div>🎤 Click or drop a 5–15 second WAV/MP3 reference clip</div>
+              <div>🎤 Click or drop a reference clip (WAV/MP3) — trim it to 5–15 s below</div>
               <div class="filename" id="clone-filename"></div>
               <input type="file" id="clone-file" accept="audio/*">
             </div>
-            <audio id="clone-ref-preview" controls style="display:none;"></audio>
+            <div class="trimmer" id="clone-trimmer" hidden></div>
 
             <div class="field" style="margin-top:12px;">
               <label>Reference Transcript</label>
@@ -146,11 +146,11 @@
 
             <div class="section-title" style="margin-top:20px;">Reference Voice Sample</div>
             <div class="dropzone" id="fish-dropzone">
-              <div>🎤 Click or drop a 10–30 second reference clip</div>
+              <div>🎤 Click or drop a reference clip — trim it to 10–30 s below</div>
               <div class="filename" id="fish-filename"></div>
               <input type="file" id="fish-file" accept="audio/*">
             </div>
-            <audio id="fish-ref-preview" controls style="display:none;"></audio>
+            <div class="trimmer" id="fish-trimmer" hidden></div>
 
             <div class="field" style="margin-top:12px;">
               <label>Reference Transcript</label>

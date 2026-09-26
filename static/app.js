@@ -104,12 +104,199 @@ function setStatusBanner(text, kind) {
   el.className = 'status-banner' + (kind ? ` ${kind}` : '');
 }
 
+// ── Reference-audio trimmer ────────────────────────────────────────────
+// Decodes the clip in the browser, lets the user pick a section on the
+// waveform, and uploads only that section (as mono 16-bit WAV).
+let sharedAudioCtx = null;
+const audioCtx = () => (sharedAudioCtx ||= new (window.AudioContext || window.webkitAudioContext)());
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function encodeWav(buffer, start, end) {
+  const sr = buffer.sampleRate;
+  const s0 = Math.floor(start * sr);
+  const n = Math.max(0, Math.floor(end * sr) - s0);
+  const mono = new Float32Array(n);
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const d = buffer.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += d[s0 + i] / buffer.numberOfChannels;
+  }
+  const view = new DataView(new ArrayBuffer(44 + n * 2));
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sr, true); view.setUint32(28, sr * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  str(36, 'data'); view.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const v = Math.max(-1, Math.min(1, mono[i]));
+    view.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  return new Blob([view], { type: 'audio/wav' });
+}
+
+function createTrimmer(root, { recMin, recMax, quick }) {
+  root.innerHTML = `
+    <div class="trim-head"><span class="trim-title">✂️ Trim reference</span><span class="trim-info"></span></div>
+    <canvas class="trim-wave"></canvas>
+    <div class="trim-controls">
+      <button type="button" class="btn btn-secondary trim-play">▶ Play selection</button>
+      <span class="trim-field">Start <input type="number" class="trim-start" min="0" step="0.1"> s</span>
+      <span class="trim-field">End <input type="number" class="trim-end" min="0" step="0.1"> s</span>
+      <button type="button" class="btn btn-secondary trim-quick">First ${quick}s</button>
+      <button type="button" class="btn btn-secondary trim-full">Full clip</button>
+    </div>
+    <div class="trim-hint">Drag across the waveform to choose the part to use. The reference transcript must match only the selected part.</div>`;
+
+  const canvas = root.querySelector('.trim-wave');
+  const info = root.querySelector('.trim-info');
+  const playBtn = root.querySelector('.trim-play');
+  const startIn = root.querySelector('.trim-start');
+  const endIn = root.querySelector('.trim-end');
+
+  let file = null, buffer = null, start = 0, end = 0;
+  let peaks = null, peaksWidth = 0;
+  let source = null, playhead = null, raf = 0, dragFrom = null, prevSel = null;
+
+  const duration = () => (buffer ? buffer.duration : 0);
+  const timeToX = (t) => (t / duration()) * canvas.clientWidth;
+  const xToTime = (x) => Math.max(0, Math.min(duration(), (x / canvas.clientWidth) * duration()));
+
+  function computePeaks(width) {
+    const data = buffer.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / width));
+    peaks = new Float32Array(width);
+    for (let x = 0; x < width; x++) {
+      let peak = 0;
+      for (let i = x * step, stop = Math.min(data.length, i + step); i < stop; i++) {
+        const v = Math.abs(data[i]);
+        if (v > peak) peak = v;
+      }
+      peaks[x] = peak;
+    }
+    peaksWidth = width;
+  }
+
+  function draw() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!buffer || !w) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const g = canvas.getContext('2d');
+    g.scale(dpr, dpr);
+    if (peaksWidth !== w) computePeaks(w);
+    const x0 = timeToX(start), x1 = timeToX(end);
+    g.fillStyle = 'rgba(91,124,250,0.12)';
+    g.fillRect(x0, 0, x1 - x0, h);
+    const on = cssVar('--accent'), off = cssVar('--border-color');
+    for (let x = 0; x < w; x++) {
+      const bh = Math.max(1, peaks[x] * h * 0.9);
+      g.fillStyle = x >= x0 && x <= x1 ? on : off;
+      g.fillRect(x, (h - bh) / 2, 1, bh);
+    }
+    g.fillStyle = cssVar('--text-primary');
+    g.fillRect(x0 - 1, 0, 2, h);
+    g.fillRect(x1 - 1, 0, 2, h);
+    if (playhead !== null) {
+      g.fillStyle = cssVar('--success');
+      g.fillRect(timeToX(playhead) - 1, 0, 2, h);
+    }
+  }
+
+  function setSelection(s, e) {
+    start = Math.max(0, Math.min(s, duration()));
+    end = Math.max(start, Math.min(e, duration()));
+    startIn.value = start.toFixed(1);
+    endIn.value = end.toFixed(1);
+    const len = end - start;
+    const outside = len < recMin || len > recMax;
+    info.textContent = `Selection ${len.toFixed(1)}s of ${duration().toFixed(1)}s` +
+      (outside ? ` · recommended ${recMin}–${recMax}s` : '');
+    info.classList.toggle('warn', outside);
+    draw();
+  }
+
+  function stopPlayback() {
+    if (source) { source.onended = null; try { source.stop(); } catch {} source = null; }
+    cancelAnimationFrame(raf);
+    playhead = null;
+    playBtn.textContent = '▶ Play selection';
+    draw();
+  }
+
+  async function togglePlayback() {
+    if (source) return stopPlayback();
+    const ctx = audioCtx();
+    if (ctx.state === 'suspended') await ctx.resume();
+    source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    const t0 = ctx.currentTime;
+    source.start(0, start, end - start);
+    source.onended = stopPlayback;
+    playBtn.textContent = '■ Stop';
+    const tick = () => {
+      playhead = start + (ctx.currentTime - t0);
+      draw();
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  playBtn.addEventListener('click', () => buffer && togglePlayback());
+  root.querySelector('.trim-quick').addEventListener('click', () => { stopPlayback(); setSelection(0, quick); });
+  root.querySelector('.trim-full').addEventListener('click', () => { stopPlayback(); setSelection(0, duration()); });
+  startIn.addEventListener('change', () => { stopPlayback(); setSelection(Math.min(+startIn.value || 0, end - 0.1), end); });
+  endIn.addEventListener('change', () => { stopPlayback(); setSelection(start, Math.max(+endIn.value || 0, start + 0.1)); });
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!buffer) return;
+    stopPlayback();
+    canvas.setPointerCapture(e.pointerId);
+    dragFrom = xToTime(e.offsetX);
+    prevSel = [start, end];
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (dragFrom === null) return;
+    const t = xToTime(e.offsetX);
+    setSelection(Math.min(dragFrom, t), Math.max(dragFrom, t));
+  });
+  canvas.addEventListener('pointerup', () => {
+    if (dragFrom === null) return;
+    if (end - start < 0.3) setSelection(...prevSel); // a plain click shouldn't wipe the selection
+    dragFrom = null;
+  });
+
+  // Redraw when the panel becomes visible or the window resizes.
+  new ResizeObserver(() => draw()).observe(canvas);
+
+  return {
+    async load(f) {
+      stopPlayback();
+      file = f; buffer = null; peaksWidth = 0;
+      root.hidden = false;
+      try {
+        buffer = await audioCtx().decodeAudioData(await f.arrayBuffer());
+        setSelection(0, buffer.duration);
+      } catch {
+        info.textContent = "Couldn't decode this file in the browser — it will be uploaded untrimmed.";
+        info.classList.add('warn');
+      }
+    },
+    // The file to upload: the original if untrimmed/undecodable, else the selected section as WAV.
+    async getFile() {
+      if (!file || !buffer) return file;
+      if (start <= 0.05 && end >= buffer.duration - 0.05) return file;
+      const base = file.name.replace(/\.[^.]+$/, '');
+      const name = `${base}_${start.toFixed(1)}-${end.toFixed(1)}s.wav`;
+      return new File([encodeWav(buffer, start, end)], name, { type: 'audio/wav' });
+    },
+  };
+}
+
 // ── Dropzones ──────────────────────────────────────────────────────────
-function initDropzone(zoneId, fileInputId, filenameId, previewId) {
+function initDropzone(zoneId, fileInputId, filenameId, onFile) {
   const zone = $(`#${zoneId}`);
   const input = $(`#${fileInputId}`);
   const filenameEl = $(`#${filenameId}`);
-  const preview = $(`#${previewId}`);
 
   const setFile = (file) => {
     if (!file) return;
@@ -117,8 +304,7 @@ function initDropzone(zoneId, fileInputId, filenameId, previewId) {
     dt.items.add(file);
     input.files = dt.files;
     filenameEl.textContent = file.name;
-    preview.src = URL.createObjectURL(file);
-    preview.style.display = 'block';
+    onFile(file);
   };
 
   zone.addEventListener('click', () => input.click());
@@ -210,7 +396,8 @@ function initEmotionTab() {
 
 // ── Voice Clone ─────────────────────────────────────────────────────────
 function initCloneTab() {
-  initDropzone('clone-dropzone', 'clone-file', 'clone-filename', 'clone-ref-preview');
+  const trimmer = createTrimmer($('#clone-trimmer'), { recMin: 5, recMax: 15, quick: 15 });
+  initDropzone('clone-dropzone', 'clone-file', 'clone-filename', (f) => trimmer.load(f));
 
   $('#clone-text').addEventListener('input', () => {
     $('#clone-char-count').textContent = `${$('#clone-text').value.length} characters`;
@@ -219,7 +406,7 @@ function initCloneTab() {
   $('#btn-generate-clone').addEventListener('click', async () => {
     const btn = $('#btn-generate-clone');
     const text = $('#clone-text').value;
-    const refFile = $('#clone-file').files[0];
+    const refFile = await trimmer.getFile();
     const refText = $('#clone-ref-text').value;
     if (!text.trim()) { showToast('Enter some text to synthesize', true); return; }
     if (!refFile) { showToast('Upload a reference audio file', true); return; }
@@ -251,7 +438,8 @@ function initCloneTab() {
 
 // ── Fish-Speech ─────────────────────────────────────────────────────────
 function initFishTab() {
-  initDropzone('fish-dropzone', 'fish-file', 'fish-filename', 'fish-ref-preview');
+  const trimmer = createTrimmer($('#fish-trimmer'), { recMin: 10, recMax: 30, quick: 20 });
+  initDropzone('fish-dropzone', 'fish-file', 'fish-filename', (f) => trimmer.load(f));
 
   $('#btn-load-fish').addEventListener('click', async () => {
     const btn = $('#btn-load-fish');
@@ -274,7 +462,7 @@ function initFishTab() {
   $('#btn-generate-fish').addEventListener('click', async () => {
     const btn = $('#btn-generate-fish');
     const text = $('#fish-text').value;
-    const refFile = $('#fish-file').files[0];
+    const refFile = await trimmer.getFile();
     const refText = $('#fish-ref-text').value;
     if (!text.trim()) { showToast('Enter some text to synthesize', true); return; }
     if (!refFile) { showToast('Upload a reference audio file', true); return; }
