@@ -267,14 +267,26 @@ class ModelManager:
                     self.log(f"  … still loading {'.' * dots}")
                 return result_q.get_nowait()
 
+            if attn_impl == "flash_attention_2":
+                import importlib.util
+                if importlib.util.find_spec("flash_attn") is None:
+                    self.log("flash-attn isn't installed — loading with sdpa directly.")
+                    attn_impl = "sdpa"
+
             self.log("Loading weights into GPU memory…")
             result = _try_load(attn_impl)
 
-            # flash_attention_2 needs the `flash-attn` wheel installed and a
-            # compatible GPU; fall back to sdpa automatically instead of
-            # hard-failing the whole load.
+            # flash-attn can be installed yet still fail (e.g. unsupported GPU);
+            # fall back to sdpa instead of hard-failing the whole load.
             if result[0] == "err" and attn_impl == "flash_attention_2":
                 self.log(f"⚠️ flash_attention_2 failed ({result[1]}); retrying with sdpa…")
+                # The failed attempt's exception keeps its stack frames (and any
+                # tensors they hold) alive; release them before loading again.
+                result = None
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 result = _try_load("sdpa")
 
             if result[0] == "err":
