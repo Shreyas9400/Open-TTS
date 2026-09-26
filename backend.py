@@ -106,19 +106,20 @@ def resolve_model_path(model_id: str) -> str:
             print(f"[cache] Using local model_cache: {local_dir.resolve()}")
             return str(local_dir.resolve())
 
-    # 2. HF Hub snapshot cache
+    # 2. HF Hub cache. snapshot_download returns the local snapshot folder and
+    #    first fetches any files missing from it (e.g. after an interrupted
+    #    download). Checking for model.safetensors alone isn't enough: Qwen3-TTS
+    #    also loads weights from a speech_tokenizer/ subfolder, and a local path
+    #    is never topped up by from_pretrained.
     try:
-        from huggingface_hub import constants
-        cache_root = Path(constants.HF_HUB_CACHE)
-        repo_slug = "models--" + model_id.replace("/", "--")
-        snap_dir = cache_root / repo_slug / "snapshots"
-        if snap_dir.is_dir():
-            snaps = sorted(snap_dir.iterdir())
-            for snap in reversed(snaps):
-                if (snap / "model.safetensors").exists() and (snap / "config.json").exists():
-                    local_path = str(snap)
-                    print(f"[cache] Using valid HF hub snapshot: {local_path}")
-                    return local_path
+        from huggingface_hub import snapshot_download
+        try:
+            local_path = snapshot_download(repo_id=model_id)
+        except Exception as e:
+            print(f"[cache] Couldn't check Hugging Face for missing files ({e}); using the local cache as-is.")
+            local_path = snapshot_download(repo_id=model_id, local_files_only=True)
+        print(f"[cache] Using HF hub snapshot: {local_path}")
+        return local_path
     except Exception as e:
         print(f"[cache] Could not resolve HF hub path for {model_id}: {e}")
 
