@@ -994,21 +994,6 @@ body, .gradio-container {
   border-radius: var(--radius-md);
 }
 
-.emotion-btn button {
-  background: transparent !important;
-  border: 1px solid var(--border-color) !important;
-  color: var(--text-secondary) !important;
-  font-size: 0.78rem !important;
-  font-weight: 500 !important;
-  padding: 5px 12px !important;
-  border-radius: 20px !important;
-  box-shadow: none !important;
-}
-.emotion-btn button:hover {
-  border-color: var(--accent) !important;
-  color: var(--text-primary) !important;
-}
-
 /* Ollama assistant box — same neutral card style as everything else */
 .ollama-card {
   background: var(--bg-card);
@@ -1017,41 +1002,51 @@ body, .gradio-container {
   padding: 14px 16px;
   margin-bottom: 14px;
 }
-.ollama-rephrase-btn button {
+
+/* Tab bar → a rounded segmented control instead of Gradio's default
+   underlined-link row (targets ARIA roles, which are stable across
+   Gradio versions, rather than internal class names, which aren't). */
+.tab-wrapper {
+  display: inline-flex !important;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 4px;
+  margin-bottom: 4px;
+}
+[role="tablist"] {
+  gap: 2px;
+}
+button[role="tab"] {
+  border: none !important;
+  background: transparent !important;
+  border-radius: 999px !important;
+  padding: 8px 18px !important;
+  font-size: 0.85rem !important;
+  font-weight: 500 !important;
+  color: var(--text-secondary) !important;
+  box-shadow: none !important;
+  transition: background 0.15s ease, color 0.15s ease !important;
+}
+button[role="tab"].selected {
   background: var(--accent) !important;
   color: white !important;
   font-weight: 600 !important;
-  border-radius: var(--radius-sm) !important;
-  border: none !important;
-  box-shadow: none !important;
 }
-.ollama-rephrase-btn button:hover {
-  background: var(--accent-strong) !important;
-}
-
-/* Gradio component overrides */
-.gradio-container .tabs > .tab-nav {
-  background: var(--bg-secondary) !important;
-  border-bottom: 1px solid var(--border-color) !important;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  padding: 4px 4px 0 4px;
-  gap: 4px;
-}
-.gradio-container .tabs button.selected {
-  background: var(--bg-card) !important;
-  color: var(--accent) !important;
-  border-bottom: 2px solid var(--accent) !important;
-  font-weight: 600;
-}
-.gradio-container .tabs button {
+.overflow-menu button {
   color: var(--text-secondary) !important;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0 !important;
-  font-family: var(--font-sans) !important;
-  font-size: 0.86rem;
-  padding: 9px 16px;
 }
 
-label, .label-wrap {
+/* Each tab panel is freshly mounted on switch, so this replays every time */
+@keyframes ttsFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+[role="tabpanel"] {
+  animation: ttsFadeIn 0.2s ease;
+}
+
+label {
   color: var(--text-secondary) !important;
   font-size: 0.8rem !important;
   font-weight: 500 !important;
@@ -1059,7 +1054,10 @@ label, .label-wrap {
   letter-spacing: 0.04em;
 }
 
-input[type=text], textarea, .gr-textbox textarea {
+.gradio-container textarea,
+.gradio-container input[type="text"],
+.gradio-container input[type="number"],
+.gradio-container input[role="combobox"] {
   background: var(--bg-secondary) !important;
   border: 1px solid var(--border-color) !important;
   border-radius: var(--radius-sm) !important;
@@ -1067,14 +1065,20 @@ input[type=text], textarea, .gr-textbox textarea {
   font-family: var(--font-sans) !important;
   font-size: 0.92rem;
 }
-input[type=text]:focus, textarea:focus {
+.gradio-container textarea:focus,
+.gradio-container input:focus {
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 2px rgba(91,124,250,0.2) !important;
   outline: none !important;
 }
 
+/* Recolor Gradio's own built-in pending/eta spinner to match our accent */
+[data-testid="status-tracker"] {
+  color: var(--accent) !important;
+}
+
 /* One consistent button style everywhere — no per-section gradients */
-.gr-button, button.primary, .primary {
+button.primary {
   background: var(--accent) !important;
   border: none !important;
   border-radius: var(--radius-sm) !important;
@@ -1082,8 +1086,64 @@ input[type=text]:focus, textarea:focus {
   font-weight: 600 !important;
   font-family: var(--font-sans) !important;
   box-shadow: none !important;
+  transition: background 0.15s ease, transform 0.1s ease !important;
 }
-.gr-button:hover, button.primary:hover {
+button.primary:hover {
+  background: var(--accent-strong) !important;
+}
+button.primary:active {
+  transform: scale(0.98);
+}
+button.secondary {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: var(--radius-sm) !important;
+  color: var(--text-primary) !important;
+  font-weight: 500 !important;
+  font-family: var(--font-sans) !important;
+  box-shadow: none !important;
+}
+button.secondary:hover {
+  border-color: var(--accent) !important;
+}
+button.stop {
+  background: transparent !important;
+  border: 1px solid #e05a5a !important;
+  color: #e05a5a !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: none !important;
+}
+
+/* NOTE: elem_classes on gr.Button land directly on the <button> element
+   itself (not a wrapper div), and these need to be at least as specific
+   as (and declared after) the button.primary/secondary rules above to
+   actually win, since emotion-tag chips carry the "secondary" variant
+   class and the Ollama button carries "primary". */
+button.emotion-btn {
+  background: transparent !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-secondary) !important;
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  padding: 5px 12px !important;
+  border-radius: 20px !important;
+  box-shadow: none !important;
+  transition: border-color 0.15s ease, color 0.15s ease !important;
+}
+button.emotion-btn:hover {
+  border-color: var(--accent) !important;
+  color: var(--text-primary) !important;
+}
+button.ollama-rephrase-btn {
+  background: var(--accent) !important;
+  color: white !important;
+  font-weight: 600 !important;
+  border-radius: var(--radius-sm) !important;
+  border: none !important;
+  box-shadow: none !important;
+  transition: background 0.15s ease !important;
+}
+button.ollama-rephrase-btn:hover {
   background: var(--accent-strong) !important;
 }
 
