@@ -79,17 +79,20 @@ EMOTION_TAGS = [
 # Fish-Speech (OpenAudio S1) uses parenthesised inline markers instead of
 # bracketed tags, and — unlike the SpragAI model above — the same model also
 # does zero-shot voice cloning, so these markers work together with a
-# reference clip.
+# reference clip. Only markers from fish-speech's documented S1 list are
+# recognized; anything else (e.g. "(gentle)") is read aloud as plain text.
 FISH_EMOTION_MARKERS = [
     ("😡 Angry", "(angry)"),
     ("😢 Sad", "(sad)"),
-    ("😊 Happy", "(happy)"),
+    ("😊 Joyful", "(joyful)"),
     ("🤩 Excited", "(excited)"),
-    ("🍃 Gentle", "(gentle)"),
+    ("🎩 Serious", "(serious)"),
+    ("🤝 Sincere", "(sincere)"),
+    ("🍃 Soft tone", "(soft tone)"),
     ("🤫 Whisper", "(whispering)"),
-    ("😂 Laughing", "(laughing)"),
-    ("😭 Crying", "(crying)"),
     ("📢 Shouting", "(shouting)"),
+    ("😂 Laughing", "(laughing)"),
+    ("😭 Sobbing", "(sobbing)"),
     ("😮‍💨 Sighing", "(sighing)"),
 ]
 
@@ -1460,8 +1463,8 @@ def build_ui():
                     with gr.Column(scale=5):
                         gr.HTML('<div class="section-title">📝 Target Text & Emotion Markers</div>')
                         fish_target_text = gr.Textbox(
-                            label="Text to synthesize (use markers like (happy), (whispering), etc.)",
-                            placeholder="(happy) Welcome everyone! (gentle) We're really glad you could join us today.",
+                            label="Text to synthesize (use markers like (joyful), (whispering), etc.)",
+                            placeholder="(joyful) Welcome everyone! (soft tone) We're really glad you could join us today.",
                             lines=6,
                             max_lines=20,
                             elem_id="fish-target-text",
@@ -1707,10 +1710,14 @@ The first "Load Fish-Speech Model" click downloads the checkpoint automatically 
 `fish_checkpoints/`. Model weights are released under **CC-BY-NC-SA-4.0** (non-commercial use only).
 
 #### Marker examples:
-`(happy)` `(sad)` `(angry)` `(excited)` `(gentle)` `(whispering)` `(laughing)` `(crying)` `(shouting)` `(sighing)`
+Only markers from fish-speech's documented S1 list work — anything else is read aloud as text.
+
+- Emotions: `(angry)` `(sad)` `(joyful)` `(excited)` `(serious)` `(sincere)` `(surprised)` `(delighted)` `(worried)` `(confident)` `(proud)` `(grateful)` `(comforting)` …
+- Tone: `(soft tone)` `(whispering)` `(shouting)` `(screaming)` `(in a hurry tone)`
+- Sounds: `(laughing)` `(chuckling)` `(sobbing)` `(crying loudly)` `(sighing)` `(panting)`
 
 ```text
-(happy) Welcome everyone! (whispering) Come a little closer... (laughing) just kidding!
+(joyful) Welcome everyone! (whispering) Come a little closer... (laughing) just kidding!
 ```
 
 ---

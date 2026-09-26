@@ -25,7 +25,7 @@ constraints and gives full control over the UI.
 - 🤖 **Ollama AI Auto-Rephraser** (`gemma2:2b`) — automatically analyzes dialogue and annotates sentences with matching emotion tags
 - 🎙️ **Zero-shot voice cloning** from a 5–15 second WAV reference (`Qwen3-TTS-12Hz-1.7B-Base`)
 - 🐟 **Fish-Speech / OpenAudio S1** — voice cloning *and* inline emotion/tone markers
-  (`(happy)`, `(whispering)`, `(laughing)`, …) in a single model (optional install, see below)
+  (`(joyful)`, `(soft tone)`, `(whispering)`, `(laughing)`, …) in a single model (optional install, see below)
 - 📝 Reference transcript input for maximum clone accuracy
 - 🌐 20+ supported languages
 - ⚙️ Adjustable generation parameters (temperature, top-p, repetition penalty)

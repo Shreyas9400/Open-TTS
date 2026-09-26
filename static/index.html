@@ -140,7 +140,7 @@
           <div>
             <div class="section-title">Target Text & Emotion Markers</div>
             <div class="field">
-              <textarea id="fish-text" rows="6" placeholder="(happy) Welcome everyone! (gentle) We're really glad you could join us today."></textarea>
+              <textarea id="fish-text" rows="6" placeholder="(joyful) Welcome everyone! (soft tone) We're really glad you could join us today."></textarea>
             </div>
             <div class="chip-row" id="fish-chip-row"></div>
 
@@ -258,7 +258,12 @@
           <p>Clone any voice from a 5–15 second reference clip + exact transcript. Repeat generations against the same clip reuse a cached voice prompt instead of re-encoding it every time.</p>
 
           <h3>🐟 Fish-Speech / OpenAudio S1</h3>
-          <p>One model, both voice cloning and inline emotion markers: <code>(happy) (sad) (angry) (excited) (gentle) (whispering) (laughing) (crying) (shouting) (sighing)</code></p>
+          <p>One model, both voice cloning and inline emotion markers. Only markers from fish-speech's documented S1 list work — anything else (e.g. <code>(gentle)</code>) is read aloud as plain text.</p>
+          <ul>
+            <li>Emotions: <code>(angry) (sad) (joyful) (excited) (serious) (sincere) (surprised) (delighted) (worried) (confident) (proud) (grateful) (comforting)</code> …</li>
+            <li>Tone: <code>(soft tone) (whispering) (shouting) (screaming) (in a hurry tone)</code></li>
+            <li>Sounds: <code>(laughing) (chuckling) (sobbing) (crying loudly) (sighing) (panting)</code></li>
+          </ul>
           <p>First "Load Fish-Speech Model" click downloads the checkpoint (a few GB) into <code>fish_checkpoints/</code>. Weights are CC-BY-NC-SA-4.0 (non-commercial).</p>
 
           <h3>⚡ Speed Tips</h3>

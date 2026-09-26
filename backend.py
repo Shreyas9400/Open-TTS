@@ -77,17 +77,20 @@ EMOTION_TAGS = [
 # Fish-Speech (OpenAudio S1) uses parenthesised inline markers instead of
 # bracketed tags, and — unlike the SpragAI model above — the same model also
 # does zero-shot voice cloning, so these markers work together with a
-# reference clip.
+# reference clip. Only markers from fish-speech's documented S1 list are
+# recognized; anything else (e.g. "(gentle)") is read aloud as plain text.
 FISH_EMOTION_MARKERS = [
     ("😡 Angry", "(angry)"),
     ("😢 Sad", "(sad)"),
-    ("😊 Happy", "(happy)"),
+    ("😊 Joyful", "(joyful)"),
     ("🤩 Excited", "(excited)"),
-    ("🍃 Gentle", "(gentle)"),
+    ("🎩 Serious", "(serious)"),
+    ("🤝 Sincere", "(sincere)"),
+    ("🍃 Soft tone", "(soft tone)"),
     ("🤫 Whisper", "(whispering)"),
-    ("😂 Laughing", "(laughing)"),
-    ("😭 Crying", "(crying)"),
     ("📢 Shouting", "(shouting)"),
+    ("😂 Laughing", "(laughing)"),
+    ("😭 Sobbing", "(sobbing)"),
     ("😮‍💨 Sighing", "(sighing)"),
 ]
 
