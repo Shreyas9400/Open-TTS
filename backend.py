@@ -22,9 +22,6 @@ from datetime import datetime
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 # Fix emoji/unicode printing on Windows cp1252 console
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-# Reduces CUDA OOMs caused by fragmentation rather than genuinely being out of
-# memory (small GPUs hit this often); must be set before torch is imported.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import soundfile as sf
