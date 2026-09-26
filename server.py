@@ -7,18 +7,26 @@ routes in, JSON/audio out. Run with:
     python server.py
 """
 
+import io
+import json
+import logging
+import re
 import shutil
 import tempfile
 import threading
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import backend
+import narration
 
 app = FastAPI(title="TTS Studio API")
 
@@ -274,9 +282,166 @@ def list_outputs():
     return [{"name": f.name, "url": f"/outputs/{f.name}"} for f in files]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Batch narration: JSON script → one clip per scene (runs narration.py's
+# generate_narration in a background thread; the UI polls for progress)
+# ─────────────────────────────────────────────────────────────────────────────
+
+NARRATION_DIR = Path("narration_output")
+NARRATION_DIR.mkdir(exist_ok=True)
+
+# A root handler up front stops generate_narration() from calling
+# logging.basicConfig(level=INFO), which would also turn on every other
+# library's INFO chatter; its own progress lines still reach the console.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+narration.log.setLevel(logging.INFO)
+
+_PROGRESS_LINE = re.compile(r"^\[\d+/\d+\] ")
+
+
+class _NarrationJob:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = False
+        self.folder = None
+        self.scene_files = []
+        self.total = 0
+        self.lines = []
+        self.counts = None
+        self.error = None
+
+
+JOB = _NarrationJob()
+
+
+class _JobLogHandler(logging.Handler):
+    def emit(self, record):
+        JOB.lines.append({"level": record.levelname.lower(), "text": record.getMessage()})
+
+
+narration.log.addHandler(_JobLogHandler())
+
+
+def _safe_folder(name: str) -> str:
+    """Output subfolder name: always a single path component under NARRATION_DIR."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", name or "").strip("-.") or "narration"
+
+
+def _run_narration(json_path: Path, ref_path: Optional[Path], kwargs: dict):
+    try:
+        JOB.counts = narration.generate_narration(
+            json_path, NARRATION_DIR / JOB.folder, ref_audio=str(ref_path) if ref_path else None, **kwargs
+        )
+    except narration.NarrationError as e:
+        JOB.error = str(e)
+    except Exception as e:
+        traceback.print_exc()
+        JOB.error = f"{type(e).__name__}: {e}"
+    finally:
+        json_path.unlink(missing_ok=True)
+        if ref_path:
+            ref_path.unlink(missing_ok=True)
+        JOB.running = False
+
+
+@app.get("/api/narration/options")
+def narration_options():
+    return {
+        "qwen_emotions": narration.QWEN_EMOTIONS,
+        "fish_emotions": narration.FISH_EMOTIONS,
+        "output_root": str(NARRATION_DIR.resolve()),
+    }
+
+
+@app.post("/api/narration/start")
+def narration_start(
+    script: UploadFile = File(...),
+    folder: str = Form(""),
+    model: str = Form("emotion"),
+    voice: str = Form("ryan"),
+    language: str = Form("Auto"),
+    emotion: str = Form(""),
+    ref_text: str = Form(""),
+    overwrite: bool = Form(False),
+    seed: int = Form(1234),
+    ref_audio: Optional[UploadFile] = File(None),
+):
+    with JOB.lock:
+        if JOB.running:
+            raise HTTPException(409, "A narration batch is already running.")
+
+        raw = script.file.read()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise HTTPException(400, f"Couldn't read the JSON script: {e}")
+        scenes = data.get("scenes") if isinstance(data, dict) else None
+        if not isinstance(scenes, list) or not scenes:
+            raise HTTPException(400, "The JSON script has no 'scenes' list.")
+
+        json_tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False, dir=str(UPLOADS_DIR))
+        with json_tmp as f:
+            f.write(raw)
+        ref_path = _save_upload(ref_audio) if ref_audio is not None and ref_audio.filename else None
+
+        JOB.running = True
+        JOB.folder = _safe_folder(folder or str(data.get("project", "")))
+        JOB.scene_files = [s["file"] for s in scenes if isinstance(s, dict) and isinstance(s.get("file"), str)]
+        JOB.total = len(scenes)
+        JOB.lines, JOB.counts, JOB.error = [], None, None
+
+    kwargs = dict(
+        voice=voice, model=model, ref_text=ref_text or None, language=language,
+        emotion=emotion or None, overwrite=overwrite, seed=seed,
+    )
+    threading.Thread(target=_run_narration, args=(Path(json_tmp.name), ref_path, kwargs), daemon=True).start()
+    return {"started": True, "folder": JOB.folder, "total": JOB.total}
+
+
+@app.get("/api/narration/status")
+def narration_status():
+    lines = list(JOB.lines)
+    out_dir = NARRATION_DIR / JOB.folder if JOB.folder else None
+    files = []
+    if out_dir:
+        for name in JOB.scene_files:
+            p = out_dir / name
+            if Path(name).name == name and p.is_file():
+                # mtime in the URL so an overwritten clip isn't served from the browser cache
+                files.append({"name": name, "url": f"/narration-files/{JOB.folder}/{quote(name)}?v={int(p.stat().st_mtime)}"})
+    return {
+        "running": JOB.running,
+        "folder": JOB.folder,
+        "output_dir": str(out_dir.resolve()) if out_dir else None,
+        "total": JOB.total,
+        "done": sum(1 for line in lines if _PROGRESS_LINE.match(line["text"])),
+        "lines": lines,
+        "counts": JOB.counts,
+        "error": JOB.error,
+        "files": files,
+    }
+
+
+@app.get("/api/narration/zip")
+def narration_zip(folder: str):
+    if _safe_folder(folder) != folder or not (NARRATION_DIR / folder).is_dir():
+        raise HTTPException(404, "No such narration folder.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:  # mp3/wav don't compress further
+        for p in sorted((NARRATION_DIR / folder).iterdir()):
+            if p.is_file() and p.suffix.lower() in narration.AUDIO_FORMATS:
+                z.write(p, p.name)
+    return Response(
+        buf.getvalue(), media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{folder}.zip"'},
+    )
+
+
 # Serve generated audio files and the static frontend. Registered last so
 # they don't shadow the /api/* routes above.
 app.mount("/outputs", StaticFiles(directory=str(backend.OUTPUTS_DIR)), name="outputs")
+app.mount("/narration-files", StaticFiles(directory=str(NARRATION_DIR)), name="narration-files")
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 

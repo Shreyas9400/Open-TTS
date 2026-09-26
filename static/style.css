@@ -484,3 +484,44 @@ audio::-webkit-media-controls-panel { background: var(--bg-secondary); }
 }
 .trim-field input { width: 76px; padding: 6px 8px; font-size: 0.82rem; }
 .trim-hint { font-size: 0.76rem; color: var(--text-muted); margin-top: 8px; }
+
+/* ── Batch narration ────────────────────────────────────────────────── */
+
+.batch-preview { padding: 12px; }
+.batch-preview-head { font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; }
+.batch-scenes { max-height: 220px; overflow-y: auto; }
+.batch-scene {
+  display: flex;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.8rem;
+}
+.batch-scene:last-child { border-bottom: none; }
+.batch-scene .name { flex: 0 0 140px; font-family: var(--font-mono); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-scene .text { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.batch-progress {
+  height: 8px;
+  margin-top: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.batch-progress > div { height: 100%; width: 0; background: var(--accent); transition: width 0.3s ease; }
+
+.batch-log { max-height: 260px; }
+.log-line.warning { color: var(--warn); }
+.log-line.error { color: var(--error); }
+
+.batch-results-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 16px 0 10px 0;
+}
+.batch-results-head .stats-line { margin: 0; font-family: var(--font-mono); font-size: 0.78rem; word-break: break-all; }
+a.btn { text-decoration: none; }

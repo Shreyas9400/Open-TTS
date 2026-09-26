@@ -16,6 +16,7 @@
       <button class="nav-item active" data-panel="emotion"><span class="icon">🎭</span> Emotion Studio</button>
       <button class="nav-item" data-panel="clone"><span class="icon">🎙️</span> Voice Clone</button>
       <button class="nav-item" data-panel="fish"><span class="icon">🐟</span> Clone + Emotion</button>
+      <button class="nav-item" data-panel="batch"><span class="icon">🎬</span> Batch Narration</button>
       <button class="nav-item" data-panel="setup"><span class="icon">⚙️</span> Setup & Models</button>
       <button class="nav-item" data-panel="history"><span class="icon">📂</span> Output History</button>
       <button class="nav-item" data-panel="guide"><span class="icon">📖</span> Guide</button>
@@ -183,6 +184,88 @@
 
             <div class="section-title" style="margin-top:20px;">Output</div>
             <div id="fish-output"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ BATCH NARRATION ═══════════════ -->
+      <section class="panel" id="panel-batch">
+        <h2>🎬 Batch Narration</h2>
+        <p class="subtitle">Generate one clip per scene from a JSON script. Each clip is saved under the scene's <code>file</code> name, in one voice for the whole run. Clips that already exist are skipped unless you tick Overwrite.</p>
+
+        <div class="grid-2">
+          <div>
+            <div class="section-title">Script</div>
+            <div class="dropzone" id="batch-dropzone">
+              <div>📄 Click or drop your narration JSON</div>
+              <div class="filename" id="batch-filename"></div>
+              <input type="file" id="batch-file" accept=".json,application/json">
+            </div>
+            <div class="card batch-preview" id="batch-preview" hidden></div>
+
+            <div class="section-title">Voice</div>
+            <div class="field-row">
+              <div class="field">
+                <label>Model</label>
+                <select id="batch-model">
+                  <option value="emotion">🎭 Qwen emotion tags (preset voices)</option>
+                  <option value="clone">🎙️ Qwen voice clone</option>
+                  <option value="fish">🐟 Fish-Speech (clone + emotion)</option>
+                </select>
+              </div>
+              <div class="field" id="batch-voice-field">
+                <label>Preset speaker</label>
+                <select id="batch-voice"></select>
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field" id="batch-language-field">
+                <label>Language</label>
+                <select id="batch-language"></select>
+              </div>
+              <div class="field" id="batch-emotion-field">
+                <label>Emotion for all scenes</label>
+                <select id="batch-emotion"></select>
+              </div>
+            </div>
+            <div class="stats-line" id="batch-emotion-note" style="margin-top:0;"></div>
+
+            <div id="batch-ref-section" hidden>
+              <div class="section-title" style="margin-top:16px;">Reference Voice Sample</div>
+              <div class="dropzone" id="batch-ref-dropzone">
+                <div>🎤 Click or drop a reference clip — trim it below</div>
+                <div class="filename" id="batch-ref-filename"></div>
+                <input type="file" id="batch-ref-file" accept="audio/*">
+              </div>
+              <div class="trimmer" id="batch-trimmer" hidden></div>
+              <div class="field">
+                <label>Reference Transcript</label>
+                <textarea id="batch-ref-text" rows="3" placeholder="Exact words spoken in the (trimmed) reference clip."></textarea>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="field">
+              <label>Output folder</label>
+              <input type="text" id="batch-folder" placeholder="Defaults to the script's project name">
+            </div>
+            <div class="stats-line" id="batch-folder-path" style="margin-top:-8px;margin-bottom:14px;"></div>
+
+            <details class="advanced">
+              <summary>Run options</summary>
+              <div class="advanced-body">
+                <div class="checkbox-field"><input type="checkbox" id="batch-overwrite"> Overwrite clips that already exist</div>
+                <div class="field"><label>Seed (same for every clip)</label><input type="number" id="batch-seed" value="1234"></div>
+              </div>
+            </details>
+
+            <button class="btn btn-primary btn-lg" id="btn-batch-start">🎬 Generate All Clips</button>
+
+            <div class="batch-progress" id="batch-progress" hidden><div></div></div>
+            <div class="stats-line" id="batch-progress-text"></div>
+            <div class="load-log batch-log" id="batch-log" hidden></div>
+            <div id="batch-results"></div>
           </div>
         </div>
       </section>

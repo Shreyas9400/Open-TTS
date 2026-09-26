@@ -79,6 +79,7 @@ async function loadConfig() {
   });
 
   renderDeviceInfo(cfg.device);
+  return cfg;
 }
 
 function appendTag(textareaSel, tag) {
@@ -133,7 +134,8 @@ function encodeWav(buffer, start, end) {
   return new Blob([view], { type: 'audio/wav' });
 }
 
-function createTrimmer(root, { recMin, recMax, quick }) {
+function createTrimmer(root, range) {
+  let { recMin, recMax, quick } = range;
   root.innerHTML = `
     <div class="trim-head"><span class="trim-title">✂️ Trim reference</span><span class="trim-info"></span></div>
     <canvas class="trim-wave"></canvas>
@@ -242,7 +244,8 @@ function createTrimmer(root, { recMin, recMax, quick }) {
   }
 
   playBtn.addEventListener('click', () => buffer && togglePlayback());
-  root.querySelector('.trim-quick').addEventListener('click', () => { stopPlayback(); setSelection(0, quick); });
+  const quickBtn = root.querySelector('.trim-quick');
+  quickBtn.addEventListener('click', () => { stopPlayback(); setSelection(0, quick); });
   root.querySelector('.trim-full').addEventListener('click', () => { stopPlayback(); setSelection(0, duration()); });
   startIn.addEventListener('change', () => { stopPlayback(); setSelection(Math.min(+startIn.value || 0, end - 0.1), end); });
   endIn.addEventListener('change', () => { stopPlayback(); setSelection(start, Math.max(+endIn.value || 0, start + 0.1)); });
@@ -269,6 +272,11 @@ function createTrimmer(root, { recMin, recMax, quick }) {
   new ResizeObserver(() => draw()).observe(canvas);
 
   return {
+    setRange(r) {
+      ({ recMin, recMax, quick } = r);
+      quickBtn.textContent = `First ${quick}s`;
+      if (buffer) setSelection(start, end);
+    },
     async load(f) {
       stopPlayback();
       file = f; buffer = null; peaksWidth = 0;
@@ -570,6 +578,192 @@ function initHistoryTab() {
   $('#btn-refresh-history').addEventListener('click', loadHistory);
 }
 
+// ── Batch narration ──────────────────────────────────────────────────────
+// Mirrors server.py's _safe_folder so the "Saves to …" preview matches.
+const safeFolder = (s) => (s || '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'narration';
+
+function el(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+async function initBatchTab(cfg) {
+  const opts = await (await fetch('/api/narration/options')).json();
+  const REF_RANGES = { clone: { recMin: 5, recMax: 15, quick: 15 }, fish: { recMin: 10, recMax: 30, quick: 20 } };
+  const trimmer = createTrimmer($('#batch-trimmer'), REF_RANGES.clone);
+  const folderInput = $('#batch-folder');
+  let scriptFile = null, project = '', pollTimer = null, wasRunning = false;
+
+  cfg.speakers.forEach((s) => $('#batch-voice').appendChild(new Option(s.label, s.id)));
+  cfg.languages.forEach((l) => $('#batch-language').appendChild(new Option(l, l)));
+
+  function showFolderPath() {
+    const root = opts.output_root;
+    const sep = root.includes('\\') ? '\\' : '/';
+    $('#batch-folder-path').textContent = `Saves to ${root}${sep}${safeFolder(folderInput.value || project)}`;
+  }
+
+  function applyModel() {
+    const m = $('#batch-model').value;
+    $('#batch-voice-field').hidden = m !== 'emotion';
+    $('#batch-language-field').hidden = m === 'fish';
+    $('#batch-emotion-field').hidden = m === 'clone';
+    $('#batch-ref-section').hidden = m === 'emotion';
+    const sel = $('#batch-emotion');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    sel.appendChild(new Option('None', ''));
+    (m === 'emotion' ? opts.qwen_emotions : m === 'fish' ? opts.fish_emotions : [])
+      .forEach((e) => sel.appendChild(new Option(e, e)));
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    $('#batch-emotion-note').textContent = m === 'clone'
+      ? 'The Qwen voice-clone model has no emotions — "emotion" fields in the JSON are skipped.'
+      : 'A scene\'s own "emotion" field in the JSON overrides this.';
+    if (m !== 'emotion') trimmer.setRange(REF_RANGES[m]);
+  }
+
+  async function loadScript(f) {
+    scriptFile = null;
+    project = '';
+    const preview = $('#batch-preview');
+    preview.hidden = false;
+    preview.innerHTML = '';
+    let data;
+    try {
+      data = JSON.parse(await f.text());
+    } catch (e) {
+      preview.appendChild(el('div', 'error-banner', `⚠️ Not valid JSON: ${e.message}`));
+      return;
+    }
+    const scenes = Array.isArray(data?.scenes) ? data.scenes : [];
+    if (!scenes.length) {
+      preview.appendChild(el('div', 'error-banner', '⚠️ This file has no "scenes" list.'));
+      return;
+    }
+    scriptFile = f;
+    project = typeof data.project === 'string' ? data.project : '';
+    folderInput.placeholder = safeFolder(project);
+    preview.appendChild(el('div', 'batch-preview-head',
+      `${scenes.length} scene${scenes.length === 1 ? '' : 's'}${project ? ` · ${project}` : ''}`));
+    const list = el('div', 'batch-scenes');
+    scenes.forEach((s) => {
+      const row = el('div', 'batch-scene');
+      row.appendChild(el('span', 'name', s?.file ?? '(no file)'));
+      row.appendChild(el('span', 'text', (s?.emotion ? `(${s.emotion}) ` : '') + (s?.text ?? '')));
+      list.appendChild(row);
+    });
+    preview.appendChild(list);
+    showFolderPath();
+  }
+
+  function renderResults(s) {
+    const box = $('#batch-results');
+    box.innerHTML = '';
+    if (!s.files.length) return;
+    const head = el('div', 'batch-results-head');
+    head.appendChild(el('div', 'stats-line', `📁 ${s.output_dir}`));
+    const zip = el('a', 'btn btn-secondary', '⬇ Download all (ZIP)');
+    zip.href = `/api/narration/zip?folder=${encodeURIComponent(s.folder)}`;
+    head.appendChild(zip);
+    box.appendChild(head);
+    const list = el('div', 'card');
+    s.files.forEach((f) => {
+      const row = el('div', 'history-item');
+      row.appendChild(el('span', 'name', f.name));
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = f.url;
+      audio.style.cssText = 'width:260px;margin:0;';
+      row.appendChild(audio);
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+  }
+
+  function render(s) {
+    const btn = $('#btn-batch-start');
+    btn.disabled = s.running;
+    btn.innerHTML = s.running ? '<span class="spinner"></span> Generating…' : '🎬 Generate All Clips';
+    if (!s.folder) return; // nothing has run since the server started
+
+    $('#batch-progress').hidden = false;
+    $('#batch-progress').firstElementChild.style.width = `${s.total ? (100 * s.done) / s.total : 0}%`;
+    const text = $('#batch-progress-text');
+    if (s.error) text.textContent = `🔴 ${s.error}`;
+    else if (s.running) text.textContent = `${s.done} / ${s.total} scenes${s.done ? '' : ' — loading model / first clip…'}`;
+    else if (s.counts) text.textContent = `✅ Finished: ${s.counts.generated} generated, ${s.counts.skipped} skipped, ${s.counts.failed} failed`;
+
+    const log = $('#batch-log');
+    log.hidden = false;
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    log.innerHTML = '';
+    s.lines.forEach((l) => log.appendChild(el('div', `log-line ${l.level}`, l.text)));
+    if (atBottom) log.scrollTop = log.scrollHeight;
+
+    if (!s.running) renderResults(s);
+  }
+
+  async function poll() {
+    clearTimeout(pollTimer);
+    const s = await (await fetch('/api/narration/status')).json();
+    render(s);
+    if (s.running) {
+      wasRunning = true;
+      pollTimer = setTimeout(poll, 1500);
+    } else if (wasRunning) {
+      wasRunning = false;
+      if (s.error) showToast(s.error, true);
+      else if (s.counts?.failed) showToast(`${s.counts.failed} scene(s) failed — see the log`, true);
+      else showToast('🎬 All clips ready!');
+    }
+  }
+
+  initDropzone('batch-dropzone', 'batch-file', 'batch-filename', loadScript);
+  initDropzone('batch-ref-dropzone', 'batch-ref-file', 'batch-ref-filename', (f) => trimmer.load(f));
+  $('#batch-model').addEventListener('change', applyModel);
+  folderInput.addEventListener('input', showFolderPath);
+
+  $('#btn-batch-start').addEventListener('click', async () => {
+    const m = $('#batch-model').value;
+    if (!scriptFile) { showToast('Choose a narration JSON first', true); return; }
+    const form = new FormData();
+    form.append('script', scriptFile);
+    form.append('folder', folderInput.value.trim());
+    form.append('model', m);
+    form.append('voice', $('#batch-voice').value);
+    form.append('language', $('#batch-language').value);
+    form.append('emotion', m === 'clone' ? '' : $('#batch-emotion').value);
+    form.append('overwrite', $('#batch-overwrite').checked);
+    form.append('seed', $('#batch-seed').value || '1234');
+    if (m !== 'emotion') {
+      const ref = await trimmer.getFile();
+      const refText = $('#batch-ref-text').value.trim();
+      if (!ref) { showToast('Upload a reference clip to clone', true); return; }
+      if (!refText) { showToast('Enter the reference transcript', true); return; }
+      form.append('ref_audio', ref);
+      form.append('ref_text', refText);
+    }
+    $('#btn-batch-start').disabled = true;
+    try {
+      const res = await fetch('/api/narration/start', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Could not start the batch');
+      $('#batch-results').innerHTML = '';
+      poll();
+    } catch (e) {
+      $('#btn-batch-start').disabled = false;
+      showToast(e.message, true);
+    }
+  });
+
+  applyModel();
+  showFolderPath();
+  poll(); // pick up a batch that's still running after a page reload
+}
+
 // ── Boot ───────────────────────────────────────────────────────────────
 async function boot() {
   initNav();
@@ -579,7 +773,8 @@ async function boot() {
   initFishTab();
   initSetupTab();
   initHistoryTab();
-  await loadConfig();
+  const cfg = await loadConfig();
+  await initBatchTab(cfg);
 }
 
 boot();
