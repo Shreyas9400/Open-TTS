@@ -38,7 +38,6 @@ import librosa
 MODEL_EMOTION_TAGS = "SpragAI/qwen3-tts-emotion-tags"
 MODEL_VOICE_CLONE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 MODEL_FISH_SPEECH = "fishaudio/openaudio-s1-mini"
-MODEL_FISH_SPEECH_FULL = "fishaudio/openaudio-s1"
 
 OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -1505,10 +1504,10 @@ def build_ui():
                         fish_model_choice = gr.Dropdown(
                             label="Fish-Speech variant",
                             choices=[
-                                (f"OpenAudio S1-mini ({MODEL_FISH_SPEECH}) — faster", MODEL_FISH_SPEECH),
-                                (f"OpenAudio S1 ({MODEL_FISH_SPEECH_FULL}) — higher quality", MODEL_FISH_SPEECH_FULL),
+                                (f"OpenAudio S1-mini ({MODEL_FISH_SPEECH})", MODEL_FISH_SPEECH),
                             ],
                             value=MODEL_FISH_SPEECH,
+                            info="Gated on Hugging Face: accept the terms on the model page, then run `hf auth login`.",
                         )
                         fish_compile_checkbox = gr.Checkbox(label="⚡ Enable compile (experimental)", value=False)
                         fish_load_btn = gr.Button("🚀 Load Fish-Speech Model", variant="primary")

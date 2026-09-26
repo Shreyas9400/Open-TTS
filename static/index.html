@@ -169,12 +169,11 @@
             </details>
 
             <div class="section-title">Load Model</div>
-            <div class="field">
-              <label>Variant</label>
-              <select id="fish-model-choice">
-                <option value="fishaudio/openaudio-s1-mini">OpenAudio S1-mini — faster</option>
-                <option value="fishaudio/openaudio-s1">OpenAudio S1 — higher quality</option>
-              </select>
+            <input type="hidden" id="fish-model-choice" value="fishaudio/openaudio-s1-mini">
+            <div class="warn-box" style="margin-top:0;margin-bottom:14px;">
+              Model: <b>OpenAudio S1-mini</b> (the only open-weights S1). Its Hugging Face repo is gated — one-time setup:<br>
+              1. Accept the terms at <a href="https://huggingface.co/fishaudio/openaudio-s1-mini" target="_blank" rel="noopener">huggingface.co/fishaudio/openaudio-s1-mini</a><br>
+              2. Run <code>hf auth login</code> and paste a token from <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
             </div>
             <div class="checkbox-field"><input type="checkbox" id="fish-compile"> Enable compile (experimental)</div>
             <button class="btn btn-secondary btn-block" id="btn-load-fish">🚀 Load Fish-Speech Model</button>

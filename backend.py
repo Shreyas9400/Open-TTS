@@ -33,8 +33,9 @@ import librosa
 
 MODEL_EMOTION_TAGS = "SpragAI/qwen3-tts-emotion-tags"
 MODEL_VOICE_CLONE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+# Only S1-mini has open weights (the 4B S1 is API-only). The HF repo is gated:
+# accept the terms on its model page and `hf auth login` before first download.
 MODEL_FISH_SPEECH = "fishaudio/openaudio-s1-mini"
-MODEL_FISH_SPEECH_FULL = "fishaudio/openaudio-s1"
 
 OUTPUTS_DIR = Path("outputs")
 OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -503,7 +504,19 @@ class FishSpeechManager:
             local_dir = FISH_CHECKPOINTS_DIR / model_id.split("/")[-1]
             if not (local_dir / "codec.pth").exists():
                 self.log(f"Downloading checkpoint for {model_id} → {local_dir} (first run only)…")
-                snapshot_download(repo_id=model_id, local_dir=str(local_dir))
+                try:
+                    snapshot_download(repo_id=model_id, local_dir=str(local_dir))
+                except Exception as e:
+                    # Name check rather than import: the error classes moved between
+                    # huggingface_hub versions. GatedRepoError subclasses RepositoryNotFoundError.
+                    if type(e).__name__ in ("GatedRepoError", "RepositoryNotFoundError"):
+                        raise RuntimeError(
+                            f"Hugging Face denied access to {model_id}. The repo is gated — "
+                            f"(1) accept the terms at https://huggingface.co/{model_id} while logged in, "
+                            f"(2) run `hf auth login` and paste a read token from "
+                            f"https://huggingface.co/settings/tokens, (3) restart the server and load again."
+                        ) from e
+                    raise
             else:
                 self.log(f"Using cached checkpoint: {local_dir}")
 

@@ -45,8 +45,7 @@ def get_config():
         "models": {
             "emotion": backend.MODEL_EMOTION_TAGS,
             "clone": backend.MODEL_VOICE_CLONE,
-            "fish_mini": backend.MODEL_FISH_SPEECH,
-            "fish_full": backend.MODEL_FISH_SPEECH_FULL,
+            "fish": backend.MODEL_FISH_SPEECH,
         },
         "languages": backend.SUPPORTED_LANGUAGES,
         "speakers": [{"id": s[0], "label": s[1]} for s in backend.PRESET_SPEAKERS],
