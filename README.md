@@ -86,6 +86,41 @@ Open **http://localhost:7860** in your browser.
 
 ---
 
+## 🎬 Batch Narration from a JSON Script
+
+`narration.py` generates one clip per scene of a JSON script, named exactly as the scene's `file` field:
+
+```json
+{
+  "project": "42-years-milestones",
+  "scenes": [
+    { "index": 0, "id": "intro", "file": "00-intro.mp3", "text": "42 Years of Growth and Expansion. 1984 to 2026." },
+    { "index": 1, "id": "1984", "file": "01-1984.mp3", "text": "1984. Our journey began...", "emotion": "sincere" }
+  ]
+}
+```
+
+```bash
+# Qwen3 emotion-tags model, preset voice (default: ryan)
+python narration.py narration.json out --voice serena
+
+# Qwen3 Base voice clone (no emotions)
+python narration.py narration.json out --model clone --ref-audio me.wav --ref-text "Exact words in me.wav"
+
+# Fish-Speech: voice clone + emotion markers; use only 5-20 s of a long reference
+python narration.py narration.json out --model fish --ref-audio me.wav --ref-start 5 --ref-end 20 \
+    --ref-text "Exact words spoken between 5 s and 20 s" --emotion sincere
+```
+
+- Progress is printed as `[n/total] file -> status`. Clips that already exist are skipped (so re-runs only fill gaps); pass `--overwrite` to regenerate them.
+- The extension in `file` picks the format: `.mp3` or `.wav`, encoded once, directly from the model's audio.
+- One voice, one set of settings and a fixed `--seed` are used for every clip, so the whole run sounds consistent.
+- `--emotion` applies to every scene; a scene's optional `"emotion"` field overrides it. Emotion model: `Angry Sad Happy Fast Gentle Tired Fearful Disgusted Surprised`. Fish: documented S1 markers such as `joyful sincere serious "soft tone" whispering`. The clone model has no emotions, so scene emotions are skipped with a warning.
+- A failed scene doesn't stop the run: it's reported, the exit code is 1, and re-running generates just that scene.
+- Run `python narration.py --help` for all options (`--language`, `--temperature`, `--top-p`, `--repetition-penalty`).
+
+---
+
 ## 🖥️ Hardware Requirements
 
 | Component | Minimum | Recommended |
