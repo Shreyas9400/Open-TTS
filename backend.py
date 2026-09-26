@@ -420,6 +420,28 @@ class ModelManager:
 # it runs alongside (not instead of) the Qwen models above.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ensure_fish_speech_project_root_marker():
+    """
+    fish_speech.models.dac.inference (and some sibling modules) call
+    pyrootutils.setup_root(__file__, indicator=".project-root") at import
+    time, which walks up from the module's own location looking for that
+    marker file. That convention assumes fish-speech is run from inside its
+    own git checkout, where the file is committed at the repo root — a
+    `pip install fish-speech` has no such file anywhere on the path, so the
+    import raises FileNotFoundError. Creating an empty marker directly
+    inside the installed package directory satisfies the search without
+    needing a git checkout.
+    """
+    try:
+        import fish_speech
+        pkg_dir = Path(fish_speech.__file__).resolve().parent
+        marker = pkg_dir / ".project-root"
+        if not marker.exists():
+            marker.touch()
+    except Exception:
+        pass  # best-effort; if this fails, the real import below will surface the error
+
+
 class FishSpeechManager:
     _instance = None
     _lock = threading.Lock()
@@ -460,6 +482,7 @@ class FishSpeechManager:
 
         try:
             self.log("Importing fish_speech … (pip install fish-speech)")
+            _ensure_fish_speech_project_root_marker()
             from fish_speech.inference_engine import TTSInferenceEngine
             from fish_speech.models.dac.inference import load_model as load_decoder_model
             from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
