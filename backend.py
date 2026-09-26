@@ -420,26 +420,33 @@ class ModelManager:
 # it runs alongside (not instead of) the Qwen models above.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ensure_fish_speech_project_root_marker():
+def _ensure_fish_speech_project_root_marker(log):
     """
-    fish_speech.models.dac.inference (and some sibling modules) call
+    fish_speech.models.dac.inference calls
     pyrootutils.setup_root(__file__, indicator=".project-root") at import
-    time, which walks up from the module's own location looking for that
-    marker file. That convention assumes fish-speech is run from inside its
-    own git checkout, where the file is committed at the repo root — a
-    `pip install fish-speech` has no such file anywhere on the path, so the
-    import raises FileNotFoundError. Creating an empty marker directly
-    inside the installed package directory satisfies the search without
-    needing a git checkout.
+    time, which walks up from the module's location looking for that marker.
+    fish-speech's own repo commits it next to the fish_speech/ folder, but a
+    `pip install fish-speech` has no such file, so the import raises
+    FileNotFoundError. We create it in the same relative spot: the directory
+    containing the installed fish_speech/ package (i.e. site-packages).
+
+    fish_speech is a namespace package (no __init__.py), so fish_speech.__file__
+    is None — locate it via find_spec's submodule_search_locations instead.
     """
-    try:
-        import fish_speech
-        pkg_dir = Path(fish_speech.__file__).resolve().parent
-        marker = pkg_dir / ".project-root"
-        if not marker.exists():
-            marker.touch()
-    except Exception:
-        pass  # best-effort; if this fails, the real import below will surface the error
+    import importlib.util
+
+    spec = importlib.util.find_spec("fish_speech")
+    if spec is None or not spec.submodule_search_locations:
+        return  # not installed; the import below raises a clear ModuleNotFoundError
+
+    for location in spec.submodule_search_locations:
+        pkg_dir = Path(location)
+        if (pkg_dir / "models" / "dac" / "inference.py").exists():
+            marker = pkg_dir.parent / ".project-root"
+            if not marker.exists():
+                marker.touch()
+                log(f"Created fish-speech root marker: {marker}")
+            return
 
 
 class FishSpeechManager:
@@ -482,7 +489,7 @@ class FishSpeechManager:
 
         try:
             self.log("Importing fish_speech … (pip install fish-speech)")
-            _ensure_fish_speech_project_root_marker()
+            _ensure_fish_speech_project_root_marker(self.log)
             from fish_speech.inference_engine import TTSInferenceEngine
             from fish_speech.models.dac.inference import load_model as load_decoder_model
             from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
