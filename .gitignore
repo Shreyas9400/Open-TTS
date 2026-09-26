@@ -19,6 +19,8 @@ model_cache/
 
 # Audio outputs & uploads
 outputs/
+uploads/
+fish_checkpoints/
 *.wav
 *.mp3
 *.ogg

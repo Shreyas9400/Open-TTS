@@ -1,0 +1,9 @@
+# The vanilla HTML/CSS/JS frontend (static/) + its FastAPI backend (server.py).
+# Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements-web.txt
+# Then run:
+#   python server.py
+
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9

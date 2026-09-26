@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTS Studio</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <div class="sidebar-brand">
+        <h1>TTS Studio</h1>
+        <p>Emotion tags · Voice cloning · Clone+emotion (Fish-Speech) · Ollama rephrasing</p>
+      </div>
+      <button class="nav-item active" data-panel="emotion"><span class="icon">🎭</span> Emotion Studio</button>
+      <button class="nav-item" data-panel="clone"><span class="icon">🎙️</span> Voice Clone</button>
+      <button class="nav-item" data-panel="fish"><span class="icon">🐟</span> Clone + Emotion</button>
+      <button class="nav-item" data-panel="setup"><span class="icon">⚙️</span> Setup & Models</button>
+      <button class="nav-item" data-panel="history"><span class="icon">📂</span> Output History</button>
+      <button class="nav-item" data-panel="guide"><span class="icon">📖</span> Guide</button>
+    </nav>
+
+    <main class="main">
+      <div id="status-banner" class="status-banner">🟡 No model loaded yet — go to Setup & Models.</div>
+
+      <!-- ═══════════════ EMOTION STUDIO ═══════════════ -->
+      <section class="panel active" id="panel-emotion">
+        <h2>🎭 Emotion Studio (SpragAI)</h2>
+        <p class="subtitle">Inline emotion tags across 9 preset voices. No voice cloning in this model — use Fish-Speech for both together.</p>
+
+        <div class="grid-2">
+          <div>
+            <div class="card">
+              <div class="section-title">🤖 AI Emotion Director (Ollama)</div>
+              <div class="field-row">
+                <div class="field"><label>Ollama URL</label><input type="text" id="ollama-url" value="http://localhost:11434"></div>
+                <div class="field"><label>Ollama Model</label><input type="text" id="ollama-model" value="gemma2:2b"></div>
+              </div>
+              <button class="btn btn-primary btn-block" id="btn-ollama-rephrase">✨ Auto-Tag & Rephrase with Ollama</button>
+              <div class="stats-line" id="ollama-status"></div>
+            </div>
+
+            <div class="section-title">Target Text & Inline Tags</div>
+            <div class="field">
+              <textarea id="emotion-text" rows="6">[Happy] Welcome everyone! [Sad] Sadly, today is our last day here. [Gentle] But we will always cherish the memories.</textarea>
+            </div>
+            <div class="chip-row" id="emotion-chip-row"></div>
+
+            <div class="field-row">
+              <div class="field">
+                <label>Preset Speaker</label>
+                <select id="emotion-speaker"></select>
+              </div>
+              <div class="field">
+                <label>Language</label>
+                <select id="emotion-language"></select>
+              </div>
+            </div>
+
+            <div class="tip-box">💡 Tags can be switched mid-sentence or per sentence. Requires the SpragAI emotion-tags model loaded in Setup.</div>
+          </div>
+
+          <div>
+            <details class="advanced">
+              <summary>Generation parameters</summary>
+              <div class="advanced-body">
+                <div class="slider-field"><div class="slider-label"><span>Temperature</span><span id="emotion-temp-val">0.9</span></div><input type="range" id="emotion-temp" min="0.1" max="2" step="0.05" value="0.9"></div>
+                <div class="slider-field"><div class="slider-label"><span>Top-p</span><span id="emotion-topp-val">0.9</span></div><input type="range" id="emotion-topp" min="0.1" max="1" step="0.05" value="0.9"></div>
+                <div class="slider-field"><div class="slider-label"><span>Repetition penalty</span><span id="emotion-reppen-val">1.0</span></div><input type="range" id="emotion-reppen" min="1" max="2" step="0.05" value="1.0"></div>
+              </div>
+            </details>
+
+            <button class="btn btn-primary btn-lg" id="btn-generate-emotion">🎭 Generate Emotion Speech</button>
+
+            <div class="section-title" style="margin-top:20px;">Output</div>
+            <div id="emotion-output"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ VOICE CLONE ═══════════════ -->
+      <section class="panel" id="panel-clone">
+        <h2>🎙️ Voice Clone (Qwen3-TTS Base)</h2>
+        <p class="subtitle">Zero-shot cloning from a short reference clip.</p>
+
+        <div class="grid-2">
+          <div>
+            <div class="section-title">Target Text</div>
+            <div class="field">
+              <textarea id="clone-text" rows="5" placeholder="Enter the text you want spoken in your reference voice…"></textarea>
+            </div>
+            <label id="clone-char-count" style="text-transform:none;letter-spacing:0;">0 characters</label>
+
+            <div class="field" style="margin-top:12px;">
+              <label>Language</label>
+              <select id="clone-language"></select>
+            </div>
+
+            <div class="section-title" style="margin-top:20px;">Reference Voice Sample</div>
+            <div class="dropzone" id="clone-dropzone">
+              <div>🎤 Click or drop a 5–15 second WAV/MP3 reference clip</div>
+              <div class="filename" id="clone-filename"></div>
+              <input type="file" id="clone-file" accept="audio/*">
+            </div>
+            <audio id="clone-ref-preview" controls style="display:none;"></audio>
+
+            <div class="field" style="margin-top:12px;">
+              <label>Reference Transcript</label>
+              <textarea id="clone-ref-text" rows="3" placeholder="Transcribe word-for-word what is said in the reference audio."></textarea>
+            </div>
+
+            <div class="tip-box">💡 Use 5–15 seconds of clean audio. The transcript must match word-for-word. Repeat generations against the same clip reuse a cached voice prompt — much faster.</div>
+          </div>
+
+          <div>
+            <details class="advanced">
+              <summary>Generation parameters</summary>
+              <div class="advanced-body">
+                <div class="slider-field"><div class="slider-label"><span>Temperature</span><span id="clone-temp-val">0.9</span></div><input type="range" id="clone-temp" min="0.1" max="2" step="0.05" value="0.9"></div>
+                <div class="slider-field"><div class="slider-label"><span>Top-p</span><span id="clone-topp-val">0.9</span></div><input type="range" id="clone-topp" min="0.1" max="1" step="0.05" value="0.9"></div>
+                <div class="slider-field"><div class="slider-label"><span>Repetition penalty</span><span id="clone-reppen-val">1.0</span></div><input type="range" id="clone-reppen" min="1" max="2" step="0.05" value="1.0"></div>
+              </div>
+            </details>
+
+            <button class="btn btn-primary btn-lg" id="btn-generate-clone">✨ Clone Voice & Generate</button>
+
+            <div class="section-title" style="margin-top:20px;">Output</div>
+            <div id="clone-output"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ FISH-SPEECH ═══════════════ -->
+      <section class="panel" id="panel-fish">
+        <h2>🐟 Clone + Emotion (Fish-Speech)</h2>
+        <p class="subtitle">One model does both zero-shot voice cloning and inline emotion/tone markers. Weights: CC-BY-NC-SA-4.0 (non-commercial). Requires <code>pip install -r requirements-fish.txt</code>.</p>
+
+        <div class="grid-2">
+          <div>
+            <div class="section-title">Target Text & Emotion Markers</div>
+            <div class="field">
+              <textarea id="fish-text" rows="6" placeholder="(happy) Welcome everyone! (gentle) We're really glad you could join us today."></textarea>
+            </div>
+            <div class="chip-row" id="fish-chip-row"></div>
+
+            <div class="section-title" style="margin-top:20px;">Reference Voice Sample</div>
+            <div class="dropzone" id="fish-dropzone">
+              <div>🎤 Click or drop a 10–30 second reference clip</div>
+              <div class="filename" id="fish-filename"></div>
+              <input type="file" id="fish-file" accept="audio/*">
+            </div>
+            <audio id="fish-ref-preview" controls style="display:none;"></audio>
+
+            <div class="field" style="margin-top:12px;">
+              <label>Reference Transcript</label>
+              <textarea id="fish-ref-text" rows="3"></textarea>
+            </div>
+          </div>
+
+          <div>
+            <details class="advanced">
+              <summary>Generation parameters</summary>
+              <div class="advanced-body">
+                <div class="slider-field"><div class="slider-label"><span>Temperature</span><span id="fish-temp-val">0.8</span></div><input type="range" id="fish-temp" min="0.1" max="1" step="0.05" value="0.8"></div>
+                <div class="slider-field"><div class="slider-label"><span>Top-p</span><span id="fish-topp-val">0.8</span></div><input type="range" id="fish-topp" min="0.1" max="1" step="0.05" value="0.8"></div>
+                <div class="slider-field"><div class="slider-label"><span>Repetition penalty</span><span id="fish-reppen-val">1.1</span></div><input type="range" id="fish-reppen" min="0.9" max="2" step="0.05" value="1.1"></div>
+              </div>
+            </details>
+
+            <div class="section-title">Load Model</div>
+            <div class="field">
+              <label>Variant</label>
+              <select id="fish-model-choice">
+                <option value="fishaudio/openaudio-s1-mini">OpenAudio S1-mini — faster</option>
+                <option value="fishaudio/openaudio-s1">OpenAudio S1 — higher quality</option>
+              </select>
+            </div>
+            <div class="checkbox-field"><input type="checkbox" id="fish-compile"> Enable compile (experimental)</div>
+            <button class="btn btn-secondary btn-block" id="btn-load-fish">🚀 Load Fish-Speech Model</button>
+            <div class="load-log" id="fish-load-log">Fish-Speech model not loaded yet.</div>
+
+            <button class="btn btn-primary btn-lg" id="btn-generate-fish" style="margin-top:16px;">🐟 Clone Voice & Generate</button>
+
+            <div class="section-title" style="margin-top:20px;">Output</div>
+            <div id="fish-output"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ SETUP ═══════════════ -->
+      <section class="panel" id="panel-setup">
+        <h2>⚙️ Setup & Models</h2>
+        <div class="grid-2">
+          <div>
+            <div class="section-title">🖥️ Hardware</div>
+            <div class="card" id="device-info">Loading device info…</div>
+
+            <div class="section-title">📦 Qwen3-TTS Model</div>
+            <div class="field">
+              <label>Model</label>
+              <select id="qwen-model-choice">
+                <option value="SpragAI/qwen3-tts-emotion-tags">🎭 Emotion Tags Model</option>
+                <option value="Qwen/Qwen3-TTS-12Hz-1.7B-Base">🎙️ Voice Clone Base Model</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>Data type</label>
+                <select id="qwen-dtype">
+                  <option>bfloat16 (Recommended)</option>
+                  <option>float16</option>
+                  <option>float32 (CPU / no GPU)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Attention backend</label>
+                <select id="qwen-attn">
+                  <option value="flash_attention_2">flash_attention_2</option>
+                  <option value="sdpa">sdpa</option>
+                  <option value="default">default</option>
+                </select>
+              </div>
+            </div>
+            <div class="checkbox-field"><input type="checkbox" id="qwen-compile"> Enable torch.compile (experimental)</div>
+            <button class="btn btn-primary btn-block" id="btn-load-qwen">🚀 Load Selected Model</button>
+          </div>
+
+          <div>
+            <div class="section-title">📋 Load Log</div>
+            <div class="load-log" id="qwen-load-log" style="max-height:340px;">Model not loaded. Select a model and click "Load Selected Model".</div>
+
+            <div class="section-title" style="margin-top:20px;">🤖 Ollama API Check</div>
+            <div class="field-row">
+              <div class="field"><input type="text" id="setup-ollama-url" value="http://localhost:11434"></div>
+              <button class="btn btn-secondary" id="btn-test-ollama" style="height:40px;">Test</button>
+            </div>
+            <div class="stats-line" id="ollama-test-result"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ HISTORY ═══════════════ -->
+      <section class="panel" id="panel-history">
+        <h2>📂 Output History</h2>
+        <button class="btn btn-secondary" id="btn-refresh-history">🔄 Refresh</button>
+        <div class="card" id="history-list" style="margin-top:12px;">Loading…</div>
+      </section>
+
+      <!-- ═══════════════ GUIDE ═══════════════ -->
+      <section class="panel" id="panel-guide">
+        <h2>📖 Guide</h2>
+        <div class="card">
+          <h3>🎭 Emotion Tag Mode (SpragAI)</h3>
+          <p>Inline tags across 9 preset voices: <code>[Angry] [Sad] [Happy] [Fast] [Gentle] [Tired] [Fearful] [Disgusted] [Surprised]</code></p>
+          <p><code>[Angry] Why didn't anyone tell me? [Sad] I felt so alone. [Gentle] But thank you for listening now.</code></p>
+
+          <h3>🎙️ Zero-Shot Voice Clone (Qwen3-TTS-Base)</h3>
+          <p>Clone any voice from a 5–15 second reference clip + exact transcript. Repeat generations against the same clip reuse a cached voice prompt instead of re-encoding it every time.</p>
+
+          <h3>🐟 Fish-Speech / OpenAudio S1</h3>
+          <p>One model, both voice cloning and inline emotion markers: <code>(happy) (sad) (angry) (excited) (gentle) (whispering) (laughing) (crying) (shouting) (sighing)</code></p>
+          <p>First "Load Fish-Speech Model" click downloads the checkpoint (a few GB) into <code>fish_checkpoints/</code>. Weights are CC-BY-NC-SA-4.0 (non-commercial).</p>
+
+          <h3>⚡ Speed Tips</h3>
+          <ul>
+            <li><b>flash_attention_2</b> is fastest on Ampere+ GPUs; falls back to sdpa automatically if unavailable.</li>
+            <li><b>torch.compile</b> speeds up steady-state generation after a slower first call.</li>
+            <li>Reusing the same reference clip skips re-encoding it every time.</li>
+            <li><b>bfloat16</b> is the fastest safe dtype on modern GPUs.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
