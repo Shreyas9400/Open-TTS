@@ -22,6 +22,9 @@ from datetime import datetime
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 # Fix emoji/unicode printing on Windows cp1252 console
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+# Reduces CUDA OOMs caused by fragmentation rather than genuinely being out of
+# memory (small GPUs hit this often); must be set before torch is imported.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import soundfile as sf
@@ -178,6 +181,20 @@ class ModelManager:
             print(entry.encode("ascii", errors="replace").decode("ascii"))
         return entry
 
+    def unload(self):
+        """Free GPU memory. Safe to call when nothing is loaded."""
+        if self.model is not None:
+            self.log(f"Unloading previous model: {self.current_model_id}…")
+            del self.model
+            self.model = None
+            self.is_loaded = False
+            self.current_model_id = None
+            self._voice_clone_prompt_cache = {}
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+
     def load_model(self, model_id: str, dtype_choice: str, attn_impl: str, compile_enabled: bool = False):
         if self.is_loading:
             return False, "Model is already loading..."
@@ -193,17 +210,16 @@ class ModelManager:
         self._voice_clone_prompt_cache = {}
 
         try:
-            # If switching models, unload previous to free VRAM
-            if self.model is not None:
-                self.log(f"Unloading previous model: {self.current_model_id}…")
-                del self.model
-                self.model = None
-                self.is_loaded = False
-                self.current_model_id = None
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                import gc
-                gc.collect()
+            # Only one of {this model, Fish-Speech} at a time: both are
+            # multi-GB and most GPUs can't comfortably hold both, so a
+            # generation on one shouldn't be sharing VRAM with a model the
+            # user loaded earlier in a different tab and forgot about.
+            fish_mgr = FishSpeechManager.get_instance()
+            if fish_mgr.is_loaded:
+                self.log("Unloading Fish-Speech to free VRAM (only one model is kept loaded at a time)…")
+                fish_mgr.unload()
+
+            self.unload()  # switching between the emotion/clone Qwen models
 
             self.log(f"Loading model: {model_id}")
             self.log(f"dtype={dtype_choice}  attn={attn_impl}  compile={compile_enabled}")
@@ -482,6 +498,30 @@ class FishSpeechManager:
             print(entry.encode("ascii", errors="replace").decode("ascii"))
         return entry
 
+    def unload(self):
+        """
+        Free GPU memory. Safe to call when nothing is loaded.
+
+        The llama (text2semantic) half runs in a background thread started by
+        launch_thread_safe_queue(), which keeps the model alive in its local
+        scope for as long as the thread runs — dropping our own reference to
+        the engine does NOT free that memory. Its worker loop exits on a
+        `None` sentinel (see fish_speech.models.text2semantic.inference),
+        which is what actually lets the model be garbage collected.
+        """
+        if self.engine is not None:
+            try:
+                self.engine.llama_queue.put(None)
+            except Exception:
+                pass
+            self.engine = None
+            self.is_loaded = False
+            self.current_model_id = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+
     def load_model(self, model_id: str, compile_enabled: bool = False):
         if self.is_loading:
             return False, "Fish-Speech model is already loading..."
@@ -492,6 +532,13 @@ class FishSpeechManager:
         self.load_log = []
 
         try:
+            # Only one of {this, the Qwen models} at a time: both are multi-GB
+            # and most GPUs can't comfortably hold both.
+            qwen_mgr = ModelManager.get_instance()
+            if qwen_mgr.is_loaded:
+                self.log("Unloading the Qwen model to free VRAM (only one model is kept loaded at a time)…")
+                qwen_mgr.unload()
+
             self.log("Importing fish_speech … (pip install fish-speech)")
             _ensure_fish_speech_project_root_marker(self.log)
             from fish_speech.inference_engine import TTSInferenceEngine
